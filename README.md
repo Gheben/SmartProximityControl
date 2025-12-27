@@ -21,10 +21,10 @@
 <div align="center">
 
 ### Main Window
-![Main Window](screenshot/main_window.png)
+![Main Window](screenshot/main_window.png?v=2)
 
 ### Entities View with Multiple Types
-![Entities View](screenshot/entities_view.png)
+![Entities View](screenshot/entities_view.png?v=2)
 
 </div>
 
