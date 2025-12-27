@@ -1,0 +1,11 @@
+[home_assistant]
+url = http://YOUR-HOME-ASSISTANT-IP:8123
+api_token = YOUR_LONG_LIVED_ACCESS_TOKEN
+
+[ui]
+title = Smart Proximity Control
+icon_size = 32
+show_tooltips = true
+
+[filters]
+entity_domains = light,switch,scene,script

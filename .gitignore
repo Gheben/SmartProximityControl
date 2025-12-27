@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+env/
+
+# Configurazione (contiene token sensibili!)
+config.ini
+ble_entity.json
+
+# Log
+*.log
+smart_proximity_control.log*
+
+# Cache
+icon_cache/
+.cache/
+
+# Build output
+build/
+dist/
+*.spec.bak
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Lock file
+*.lock
