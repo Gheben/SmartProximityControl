@@ -1,4 +1,22 @@
-# Smart Proximity Control - Home Assistant BLE Interface
+# Smart Proximity Control
+
+<div align="center">
+
+![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)
+![License](https://img.shields.io/badge/License-MIT-green.svg)
+![Platform](https://img.shields.io/badge/Platform-Windows%20|%20Linux%20|%20macOS-lightgrey.svg)
+![PyQt6](https://img.shields.io/badge/PyQt6-6.0+-brightgreen.svg)
+![Home Assistant](https://img.shields.io/badge/Home%20Assistant-Integration-blue.svg)
+
+**A modern BLE proximity-based control system for Home Assistant**
+
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-Support%20-yellow.svg?logo=buy-me-a-coffee&logoColor=white)](https://buymeacoffee.com/guidoballau)
+
+</div>
+
+---
+
+## 📖 Overview
 
 Sistema di controllo automatico delle entità di Home Assistant basato su rilevamento BLE (Bluetooth Low Energy).
 
