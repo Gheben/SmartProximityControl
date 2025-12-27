@@ -75,11 +75,11 @@ def setup_logging():
     log_file = os.path.join(base_path, 'smart_proximity_control.log')
     max_log_size = 5 * 1024 * 1024
     
-    # Create a logger
+    # Create a logger (only ERROR and above)
     logger = logging.getLogger('spc_logger')
-    logger.setLevel(logging.INFO)
+    logger.setLevel(logging.ERROR)
     
-    # Create a rotating file handler
+    # Create a rotating file handler (5MB max, 3 backups)
     file_handler = logging.handlers.RotatingFileHandler(
         log_file, maxBytes=max_log_size, backupCount=3
     )
@@ -586,8 +586,8 @@ class EntityWidget(QWidget):
         """)
         
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(5)
+        layout.setContentsMargins(8, 10, 8, 12)  # Più margine in basso
+        layout.setSpacing(8)  # Più spazio tra icona e testo
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         self.icon_label = QLabel()
@@ -597,7 +597,8 @@ class EntityWidget(QWidget):
 
         alias_label = QLabel(item.get('alias', self.entity_id))
         alias_label.setWordWrap(True)
-        alias_label.setFixedWidth(ICON_SIZE + 16)  # Stessa larghezza dell'icona
+        alias_label.setMaximumWidth(ICON_SIZE + 40)  # Larghezza maggiore per il testo
+        alias_label.setMinimumHeight(30)  # Altezza minima per non tagliare il testo
         # Use the correct enum access for PyQt6
         alias_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         alias_label.setStyleSheet("""
@@ -765,6 +766,10 @@ class HomeAssistantGUI(QWidget):
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
         
+        # Attributi per migliorare il rendering della finestra frameless
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, False)
+        
         # Stile moderno con gradiente e bordi arrotondati - sfondo opaco visibile
         self.setStyleSheet("""
             QWidget#MainWindow {
@@ -804,8 +809,9 @@ class HomeAssistantGUI(QWidget):
         # Use the correct enum access for PyQt6
         self.main_layout.addWidget(self.title_label, alignment=Qt.AlignmentFlag.AlignCenter)
 
-        self.entities_layout = QHBoxLayout()
-        self.entities_layout.setSpacing(12)
+        # Usa VBoxLayout per supportare righe multiple di entità
+        self.entities_layout = QVBoxLayout()
+        self.entities_layout.setSpacing(8)
         # Use the correct enum access for PyQt6
         self.entities_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
@@ -1018,11 +1024,56 @@ class HomeAssistantGUI(QWidget):
 
         safe_print(f"Found {len(entities)} entities for area {area_name}")
         
-        # Crea nuovi widget per le entità
+        # Raggruppa entità per dominio (tipo)
+        entities_by_domain = {}
         for item in entities:
-            widget = EntityWidget(item, self.image_provider)
-            self.entity_widgets.append(widget)
-            self.entities_layout.addWidget(widget)
+            domain = item['entity_id'].split('.')[0]
+            if domain not in entities_by_domain:
+                entities_by_domain[domain] = []
+            entities_by_domain[domain].append(item)
+        
+        # Mappa nomi domini in etichette leggibili
+        domain_labels = {
+            'light': '💡 Lights',
+            'switch': '🔌 Switches',
+            'scene': '🎬 Scenes',
+            'script': '📜 Scripts',
+            'cover': '🪟 Covers',
+            'fan': '🌀 Fans',
+            'climate': '🌡️ Climate',
+            'media_player': '📺 Media',
+        }
+        
+        # Crea una riga (HBoxLayout) per ogni tipo di entità
+        for domain, domain_entities in entities_by_domain.items():
+            # Container per la riga completa (label + entità)
+            row_container = QVBoxLayout()
+            row_container.setSpacing(4)
+            
+            # Etichetta del tipo
+            type_label = QLabel(domain_labels.get(domain, domain.capitalize()))
+            type_label.setStyleSheet("""
+                color: #95a5a6;
+                font-size: 7pt;
+                font-weight: bold;
+                background: transparent;
+                padding: 2px;
+            """)
+            type_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
+            row_container.addWidget(type_label)
+            
+            # Layout orizzontale per le entità
+            row_layout = QHBoxLayout()
+            row_layout.setSpacing(10)
+            row_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            
+            for item in domain_entities:
+                widget = EntityWidget(item, self.image_provider)
+                self.entity_widgets.append(widget)
+                row_layout.addWidget(widget)
+            
+            row_container.addLayout(row_layout)
+            self.entities_layout.addLayout(row_container)
 
         # Aggiorna lo stato iniziale
         if self.entity_widgets:
@@ -1045,13 +1096,26 @@ class HomeAssistantGUI(QWidget):
         self.stop_ble_scan.set()
         self.status_label.setText(f"Area: {area_name} - Ready")
         
-        # Ridimensiona la finestra in base al numero di entità
-        num_entities = len(self.entity_widgets)
-        if num_entities > 0:
-            # Larghezza: (icona + padding) * numero entità + margini
-            new_width = min(500, max(250, (ICON_SIZE + 40) * num_entities + 80))
-            # Altezza fissa più compatta
-            new_height = 220
+        # Ridimensiona la finestra in base al layout delle entità
+        if self.entity_widgets:
+            # Calcola il numero massimo di entità in una riga
+            max_entities_per_row = 0
+            num_rows = self.entities_layout.count()
+            
+            for i in range(num_rows):
+                row_container = self.entities_layout.itemAt(i).layout()
+                if row_container and row_container.count() > 1:
+                    # Il secondo elemento è l'HBoxLayout con le entità
+                    entities_layout = row_container.itemAt(1).layout()
+                    if entities_layout:
+                        max_entities_per_row = max(max_entities_per_row, entities_layout.count())
+            
+            # Larghezza: basata sulla riga più lunga
+            new_width = min(600, max(320, (ICON_SIZE + 32) * max_entities_per_row + 100))
+            # Altezza: basata sul numero di righe (label + icone)
+            base_height = 180
+            row_height = ICON_SIZE + 35  # Spazio per label + icone
+            new_height = min(500, base_height + (row_height * num_rows))
             self.setFixedSize(new_width, new_height)
         
         # Centra la finestra sullo schermo
@@ -1068,10 +1132,26 @@ class HomeAssistantGUI(QWidget):
 
     def clear_entities(self):
         """Pulisce tutte le entità dalla GUI."""
+        # Rimuovi tutti i widget
         for widget in self.entity_widgets:
-            self.entities_layout.removeWidget(widget)
             widget.deleteLater()
         self.entity_widgets.clear()
+        
+        # Rimuovi tutti i layout figli (i container delle righe)
+        while self.entities_layout.count():
+            row_container = self.entities_layout.takeAt(0)
+            if row_container.layout():
+                # È un VBoxLayout (container riga), rimuovi label e layout entità
+                while row_container.layout().count():
+                    child = row_container.layout().takeAt(0)
+                    if child.widget():
+                        child.widget().deleteLater()
+                    elif child.layout():
+                        # È l'HBoxLayout con le entità
+                        while child.layout().count():
+                            child.layout().takeAt(0)
+                        child.layout().deleteLater()
+                row_container.layout().deleteLater()
 
     def start_background_updates(self):
         """Avvia gli aggiornamenti periodici dello stato."""
@@ -1183,6 +1263,10 @@ class HomeAssistantGUI(QWidget):
             else:
                 # Click su area vuota: inizia drag della finestra
                 self.dragging = True
+                # Salva dimensioni correnti e rimuovi vincoli fissi
+                self.saved_size = self.size()
+                self.setMinimumSize(0, 0)
+                self.setMaximumSize(16777215, 16777215)
                 self.drag_position = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
                 event.accept()
         else:
@@ -1200,7 +1284,12 @@ class HomeAssistantGUI(QWidget):
     def mouseReleaseEvent(self, event):
         """Termina il drag della finestra."""
         if event.button() == Qt.MouseButton.LeftButton:
-            self.dragging = False
+            if self.dragging:
+                self.dragging = False
+                # Riabilita layout e aggiornamenti
+                self.main_layout.setEnabled(True)
+                self.setUpdatesEnabled(True)
+                self.update()
             event.accept()
 
     def navigate(self, direction):
