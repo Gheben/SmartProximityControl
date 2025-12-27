@@ -16,7 +16,21 @@
 
 ---
 
-## 📖 Overview
+## � Screenshots
+
+<div align="center">
+
+### Main Window
+![Main Window](screenshot/main_window.png)
+
+### Entities View with Multiple Types
+![Entities View](screenshot/entities_view.png)
+
+</div>
+
+---
+
+## �📖 Overview
 
 Automatic control system for Home Assistant entities based on BLE (Bluetooth Low Energy) proximity detection.
 
