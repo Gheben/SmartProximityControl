@@ -146,6 +146,20 @@ Nel file `config.ini`, sezione `[filters]`, puoi specificare quali tipi di entit
 - **Finestra frameless:** Design moderno senza bordi, con sfondo opaco visibile
 - **File unico:** `get_area_id.py` è stato integrato in `hapy.py` (usa `--list-areas`)
 
+## Credits
+
+This project is based on the original [hapy](https://github.com/gianlucaromito/hapy) by [Gianluca Romito](https://github.com/gianlucaromito).
+
+**Major enhancements and features added:**
+- 🎨 Modern UI with custom logo and MDI icons
+- 🏷️ Entity grouping by type with labels
+- 🔧 Improved configuration management
+- 🪟 Advanced window drag handling
+- 📝 Optimized logging with rotation
+- 🚀 Enhanced agent mode with better memory management
+
+Special thanks to the original author for the foundational work!
+
 ## Licenza
 
 MIT
