@@ -103,7 +103,7 @@ entity_domains = light
 }
 ```
 
-**IMPORTANTE:** Gli `area_id` devono corrispondere esattamente a quelli di Home Assistant. Usa `python hapy.py --list-areas` per vederli.
+**IMPORTANTE:** Gli `area_id` devono corrispondere esattamente a quelli di Home Assistant. Usa `python smart_proximity_control.py --list-areas` per vederli.
 
 ## Creazione file .exe
 
@@ -111,15 +111,15 @@ Per creare un eseguibile Windows standalone:
 
 ```bash
 pip install pyinstaller
-pyinstaller --onefile --windowed --add-data "config.ini;." --add-data "ble_entity.json;." hapy.py
+pyinstaller --onefile --windowed --add-data "config.ini;." --add-data "ble_entity.json;." smart_proximity_control.py
 ```
 
-L'eseguibile sarà in `dist/hapy.exe`. 
+L'eseguibile sarà in `dist/SmartProximityControl.exe`. 
 
 **Per avviarlo in modalità Agent all'avvio di Windows:**
 
-1. Crea un collegamento a `hapy.exe`
-2. Proprietà → Target: `C:\path\to\hapy.exe --agent`
+1. Crea un collegamento a `SmartProximityControl.exe`
+2. Proprietà → Target: `C:\path\to\SmartProximityControl.exe --agent`
 3. Proprietà → Esegui: Ridotto a icona
 4. Copia il collegamento in: `C:\Users\TUONOME\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup`
 
@@ -144,7 +144,7 @@ Nel file `config.ini`, sezione `[filters]`, puoi specificare quali tipi di entit
 - **Scansione singola:** Ogni attivazione effettua una nuova scansione per rilevare la posizione attuale
 - **Privilegi:** Eseguire come amministratore per registrare hotkey globali su Windows
 - **Finestra frameless:** Design moderno senza bordi, con sfondo opaco visibile
-- **File unico:** `get_area_id.py` è stato integrato in `hapy.py` (usa `--list-areas`)
+- **File unico:** `get_area_id.py` è stato integrato in `smart_proximity_control.py` (usa `--list-areas`)
 
 ## Credits
 
