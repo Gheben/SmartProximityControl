@@ -17,10 +17,21 @@ api_token = YOUR_LONG_LIVED_ACCESS_TOKEN
 # url_5 = http://LOCATION5-HOME-ASSISTANT-IP:8123
 # api_token_5 = LOCATION5_LONG_LIVED_ACCESS_TOKEN
 
-[ui]
+# Voice control (agent mode only)
+voice_control = false
+voice_hotkey = ctrl+shift+i
+# Entity domains for voice control (comma separated: light, switch, cover, fan, etc.)
+entity_domains = light
+
+# Agent mode hotkeys (customizable)
+show_hotkey = ctrl+shift+space
+quit_hotkey = ctrl+shift+q
+
+[filters]
+# Entity domains for proximity control (comma separated: light, switch, cover, fan, scene, script, etc.)
+entity_domains = light,switch,scene,script
+
+[gui]
 title = Smart Proximity Control
 icon_size = 32
 show_tooltips = true
-
-[filters]
-entity_domains = light,switch,scene,script

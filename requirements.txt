@@ -5,3 +5,6 @@ PyQt6-sip>=13.6.0
 bleak>=0.21.0
 pyyaml>=6.0.1
 keyboard>=0.13.5
+SpeechRecognition>=3.10.0
+sounddevice>=0.4.6
+numpy>=1.24.0

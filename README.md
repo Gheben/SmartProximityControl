@@ -40,12 +40,15 @@ Automatic control system for Home Assistant entities based on BLE (Bluetooth Low
 
 - 🎯 **Automatic detection** of location via BLE devices
 - 🏠 **Home Assistant integration** for entity control
-- ⌨️ **Global hotkeys** - Ctrl+Shift+Space (show), Ctrl+Shift+Q (quit)
+- 🎤 **Voice control** with Google Speech Recognition (Italian language)
+- ⌨️ **Configurable global hotkeys** via config.ini
 - 🖼️ **Modern interface** with MDI icons, gradient, and custom logo
 - 💾 **Device memory** (10 seconds) for fast reopening
 - 🚀 **Agent mode** for automatic background startup
 - 📦 **Standalone executable** without Python dependencies
 - 🎨 **Custom icon** (logo_gb.ico) in window and taskbar
+- 🌐 **Multi-instance support** - Auto-connect to available Home Assistant
+- 🔌 **Lazy connection** - Works even when HA is offline at startup
 
 ## Usage Modes
 
@@ -58,7 +61,7 @@ SmartProximityControl.exe
 ```
 
 ### Agent Mode (Recommended for auto-start)
-Stays in background and activates with **Ctrl+Shift+Space**:
+Stays in background and activates with configurable hotkeys:
 ```bash
 python smart_proximity_control.py --agent
 # Or (executable):
@@ -66,11 +69,13 @@ SmartProximityControl.exe --agent
 ```
 
 **Agent Mode Operation:**
-- Press **Ctrl+Shift+Space** to show window and start BLE scanning
-- Press **Ctrl+Shift+Q** to completely close the application
+- Press **Ctrl+Shift+Space** (default) to show window and start BLE scanning
+- Press **Ctrl+Shift+I** (default) to activate voice control
+- Press **Ctrl+Shift+Q** (default) to completely close the application
 - Press **ESC** to manually hide the window
 - **Device memory**: Entities remain in memory for 10 seconds after closing
 - Each scan detects the current area based on the nearest BLE device
+- **All hotkeys are configurable** in `config.ini`
 
 ### Utility - List Areas
 Shows all areas configured in Home Assistant:
@@ -99,15 +104,33 @@ pip install -r requirements.txt
 url = http://homeassistant.local:8123
 api_token = your_long_lived_access_token
 
+# Voice control (agent mode only)
+voice_control = true
+voice_hotkey = ctrl+shift+i
+# Entity domains for voice control (comma separated)
+entity_domains = light
+
+# Configurable hotkeys for agent mode
+show_hotkey = ctrl+shift+space
+quit_hotkey = ctrl+shift+q
+
+[filters]
+# Domains for proximity control (comma separated)
+entity_domains = light
+
 [gui]
 title = Smart Proximity Control
 icon_size = 48
 show_tooltips = true
-
-[filters]
-# Domains to show (comma separated)
-entity_domains = light
 ```
+
+**Voice Control Configuration:**
+- `voice_control = true` - Enable voice control in agent mode
+- `voice_hotkey` - Hotkey to activate voice listening
+- `entity_domains` (under `[home_assistant]`) - Entity types controllable by voice
+- Voice recognition uses Google Speech Recognition (requires internet)
+- Automatically detects current room via BLE before executing commands
+- Supported commands: "Accendi [luce]", "Spegni [luce]", "Apri [tapparella]", "Chiudi [tapparella]"
 
 4. Configure `ble_entity.json`:
 ```json
@@ -142,9 +165,11 @@ The executable will be in `dist/SmartProximityControl.exe`.
 ## Requirements
 
 - Python 3.8+
-- Windows 10/11 (for global hotkeys)
+- Windows 10/11 (for global hotkeys and voice control)
 - Bluetooth LE supported
 - Home Assistant with REST API enabled
+- Microphone (for voice control feature)
+- Internet connection (for Google Speech Recognition)
 
 ## Domain Configuration
 
@@ -167,12 +192,15 @@ In the `config.ini` file, `[filters]` section, you can specify which entity type
 This project is based on the original [hapy](https://github.com/gianlucaromito/hapy) by [Gianluca Romito](https://github.com/gianlucaromito).
 
 **Major enhancements and features added:**
+- � Voice control with BLE room detection and Google Speech Recognition
 - 🎨 Modern UI with custom logo and MDI icons
 - 🏷️ Entity grouping by type with labels
-- 🔧 Improved configuration management
+- ⚙️ Configurable hotkeys via config.ini
+- 🔧 Improved configuration management with multi-instance support
 - 🪟 Advanced window drag handling
 - 📝 Optimized logging with rotation
-- 🚀 Enhanced agent mode with better memory management
+- 🚀 Enhanced agent mode with lazy connection and better memory management
+- 🌐 Automatic failover between multiple Home Assistant instances
 
 Special thanks to the original author for the foundational work!
 

@@ -16,6 +16,12 @@ import asyncio
 from bleak import BleakScanner
 import keyboard
 
+# Import per Voice Control (integrato)
+import speech_recognition as sr
+import sounddevice as sd
+import numpy as np
+import winsound
+
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QLabel, QVBoxLayout, QHBoxLayout, 
     QFrame, QGraphicsDropShadowEffect, QSystemTrayIcon, QMenu
@@ -25,6 +31,9 @@ from PyQt6.QtSvg import QSvgRenderer
 from PyQt6.QtCore import (
     Qt, QThread, QObject, QTimer, QEvent, pyqtSignal as Signal
 )
+
+# Voice Control è integrato direttamente
+VOICE_CONTROL_AVAILABLE = True
 
 # Funzione per ottenere il percorso base (directory dell'eseguibile o dello script)
 def get_base_path():
@@ -98,6 +107,481 @@ def setup_logging():
     logger.addHandler(console_handler)
     
     return logger
+
+# =============================================================================
+# VOICE CONTROL INTEGRATO
+# =============================================================================
+
+def load_voice_ble_mapping():
+    """Carica la mappatura BLE -> stanza da ble_entity.json (per voice control)."""
+    base_path = get_base_path()
+    ble_file = os.path.join(base_path, BLE_ENTITY_FILE)
+    
+    if not os.path.exists(ble_file):
+        safe_print(f"⚠️ File {BLE_ENTITY_FILE} non trovato")
+        return None
+    
+    try:
+        with open(ble_file, 'r', encoding='utf-8') as f:
+            mapping = json.load(f)
+        
+        # Estrai la mappatura BLE (MAC -> area)
+        ble_mapping = {}
+        for entity in mapping.get('entities', []):
+            mac = entity.get('mac')
+            area = entity.get('area')
+            if mac and area:
+                ble_mapping[mac.upper()] = area
+        
+        if ble_mapping:
+            safe_print(f"✓ Caricata mappatura BLE: {len(ble_mapping)} dispositivi")
+        return ble_mapping if ble_mapping else None
+        
+    except Exception as e:
+        safe_print(f"⚠️ Errore caricamento {BLE_ENTITY_FILE}: {e}")
+        return None
+
+async def voice_detect_current_room(ble_mapping, scan_duration=3):
+    """Rileva la stanza corrente basandosi sui beacon BLE visibili."""
+    try:
+        devices = await BleakScanner.discover(timeout=scan_duration)
+        
+        for device in devices:
+            mac = device.address.upper()
+            if mac in ble_mapping:
+                room = ble_mapping[mac]
+                safe_print(f"📍 Beacon trovato: {device.name or mac} → {room}")
+                return room
+        
+        return None
+            
+    except Exception as e:
+        safe_print(f"✗ Errore scansione BLE: {e}")
+        return None
+
+def voice_get_all_entities(ha_url, ha_token):
+    """Recupera tutte le entità da Home Assistant (per voice control)."""
+    try:
+        headers = {
+            "Authorization": f"Bearer {ha_token}",
+            "Content-Type": "application/json",
+        }
+        response = requests.get(f"{ha_url}/api/states", headers=headers, timeout=5)
+        if response.status_code == 200:
+            return response.json()
+        return []
+    except Exception as e:
+        safe_print(f"✗ Errore recupero entità: {e}")
+        return []
+
+def voice_get_entities_in_area(ha_url, ha_token, area_id, domain_filter=None):
+    """Recupera tutte le entità appartenenti a una specifica area/stanza."""
+    try:
+        headers = {
+            "Authorization": f"Bearer {ha_token}",
+            "Content-Type": "application/json",
+        }
+        
+        # Ottieni tutte le entità
+        response = requests.get(f"{ha_url}/api/states", headers=headers, timeout=5)
+        if response.status_code != 200:
+            return []
+        
+        all_entities = response.json()
+        
+        # Ottieni il registry delle entità per trovare l'area
+        entity_reg_url = f"{ha_url}/api/config/entity_registry"
+        entity_reg_response = requests.get(entity_reg_url, headers=headers, timeout=5)
+        
+        if entity_reg_response.status_code != 200:
+            return []
+        
+        entity_registry = entity_reg_response.json()
+        
+        # Filtra le entità per area e dominio
+        entities_in_area = []
+        for entity in all_entities:
+            entity_id = entity['entity_id']
+            
+            # Filtra per dominio se specificato
+            if domain_filter:
+                domain = entity_id.split('.')[0]
+                if domain not in domain_filter:
+                    continue
+            
+            # Cerca nell'entity registry
+            for reg_entity in entity_registry:
+                if reg_entity.get('entity_id') == entity_id:
+                    if reg_entity.get('area_id') == area_id:
+                        entities_in_area.append(entity)
+                        break
+        
+        return entities_in_area
+        
+    except Exception as e:
+        safe_print(f"✗ Errore recupero entità area: {e}")
+        return []
+
+def voice_find_entity_by_name(entities, name_to_find, current_room_entities=None, entity_domains=None):
+    """Trova un'entità dal nome friendly o entity_id."""
+    name_lower = name_to_find.lower().strip()
+    if entity_domains is None:
+        entity_domains = ['light']
+    
+    # Se abbiamo entità della stanza corrente, cerca prima lì
+    if current_room_entities:
+        for entity in current_room_entities:
+            friendly_name = entity.get('attributes', {}).get('friendly_name', '')
+            if friendly_name.lower() == name_lower:
+                return entity['entity_id']
+        
+        for entity in current_room_entities:
+            friendly_name = entity.get('attributes', {}).get('friendly_name', '')
+            entity_id = entity['entity_id']
+            if name_lower in friendly_name.lower() or name_lower in entity_id.lower():
+                return entity['entity_id']
+    
+    # Cerca in tutte le entità ma solo nei domini configurati
+    domain_prefixes = tuple(f"{d}." for d in entity_domains)
+    filtered_entities = [e for e in entities if e['entity_id'].startswith(domain_prefixes)]
+    
+    for entity in filtered_entities:
+        friendly_name = entity.get('attributes', {}).get('friendly_name', '')
+        if friendly_name.lower() == name_lower:
+            return entity['entity_id']
+    
+    for entity in filtered_entities:
+        friendly_name = entity.get('attributes', {}).get('friendly_name', '')
+        entity_id = entity['entity_id']
+        if name_lower in friendly_name.lower() or name_lower in entity_id.lower():
+            return entity['entity_id']
+    
+    return None
+
+def voice_execute_command(ha_url, ha_token, entity_id, action):
+    """Esegue un comando su un'entità."""
+    try:
+        domain = entity_id.split('.')[0]
+        
+        service_map = {
+            'turn_on': f"{domain}.turn_on",
+            'turn_off': f"{domain}.turn_off",
+            'open_cover': "cover.open_cover",
+            'close_cover': "cover.close_cover",
+        }
+        
+        service = service_map.get(action)
+        if not service:
+            return False
+        
+        headers = {
+            "Authorization": f"Bearer {ha_token}",
+            "Content-Type": "application/json",
+        }
+        
+        payload = {"entity_id": entity_id}
+        url = f"{ha_url}/api/services/{service.replace('.', '/')}"
+        
+        response = requests.post(url, headers=headers, json=payload, timeout=5)
+        return response.status_code == 200
+    except Exception as e:
+        safe_print(f"✗ Errore esecuzione comando: {e}")
+        return False
+
+
+class VoiceController:
+    """Controller principale per il riconoscimento vocale."""
+    
+    def __init__(self, ha_instances, ble_mapping, entity_domains=None):
+        self.ha_instances = ha_instances  # Lista di istanze HA
+        self.ha_url = None
+        self.ha_token = None
+        self.entities = []
+        self.is_enabled = True
+        self.is_listening = False
+        self.ble_mapping = ble_mapping
+        self.entity_domains = entity_domains or ['light']
+        self.current_room = None
+        self.current_room_lights = []
+        self.room_cache_time = None
+        self.room_cache_duration = 15
+        self.recognizer = sr.Recognizer()
+        self.is_connected = False
+        
+        # Tenta connessione iniziale (non bloccante)
+        self._try_connect()
+    
+    def _try_connect(self):
+        """Tenta di connettersi a Home Assistant."""
+        for instance in self.ha_instances:
+            url = instance['url']
+            token = instance['token']
+            try:
+                headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+                response = requests.get(f"{url}/api/", headers=headers, timeout=3)
+                if response.status_code == 200:
+                    self.ha_url = url
+                    self.ha_token = token
+                    self.entities = voice_get_all_entities(url, token)
+                    self.is_connected = True
+                    safe_print(f"✓ Voice Control connesso a {url}")
+                    return True
+            except:
+                continue
+        self.is_connected = False
+        return False
+    
+    def detect_room(self):
+        """Rileva la stanza corrente tramite BLE e carica le sue luci."""
+        if not self.ble_mapping:
+            self.current_room = None
+            self.current_room_lights = []
+            return
+        
+        # Verifica cache
+        if self.room_cache_time and self.current_room:
+            elapsed = time.time() - self.room_cache_time
+            if elapsed < self.room_cache_duration:
+                remaining = int(self.room_cache_duration - elapsed)
+                safe_print(f"📍 Uso stanza in cache: {self.current_room} (ancora {remaining}s)")
+                if self.current_room_lights:
+                    light_names = [e.get('attributes', {}).get('friendly_name', e['entity_id']) 
+                                  for e in self.current_room_lights]
+                    safe_print(f"💡 {len(self.current_room_lights)} luci: {', '.join(light_names)}")
+                return
+        
+        try:
+            safe_print("📡 Rilevamento stanza...")
+            
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            self.current_room = loop.run_until_complete(
+                voice_detect_current_room(self.ble_mapping, scan_duration=3)
+            )
+            loop.close()
+            
+            if self.current_room:
+                safe_print(f"📍 Stanza rilevata: {self.current_room}")
+                self.current_room_lights = voice_get_entities_in_area(
+                    self.ha_url, self.ha_token, self.current_room, 
+                    domain_filter=self.entity_domains
+                )
+                if self.current_room_lights:
+                    light_names = [e.get('attributes', {}).get('friendly_name', e['entity_id']) 
+                                  for e in self.current_room_lights]
+                    safe_print(f"💡 {len(self.current_room_lights)} luci trovate: {', '.join(light_names)}")
+                else:
+                    safe_print(f"⚠️  Nessuna luce trovata nella stanza {self.current_room}")
+            else:
+                safe_print("⚠️  Nessuna stanza rilevata")
+                self.current_room_lights = []
+                self.room_cache_time = None
+                
+        except Exception as e:
+            safe_print(f"✗ Errore rilevamento stanza: {e}")
+            self.current_room = None
+            self.current_room_lights = []
+            self.room_cache_time = None
+    
+    def parse_command(self, text):
+        """Analizza il comando vocale e determina azione ed entità."""
+        text_lower = text.lower().strip()
+        
+        commands = {
+            'accendi': 'turn_on',
+            'accenda': 'turn_on',
+            'attiva': 'turn_on',
+            'spegni': 'turn_off',
+            'spegna': 'turn_off',
+            'disattiva': 'turn_off',
+            'apri': 'open_cover',
+            'chiudi': 'close_cover',
+        }
+        
+        action = None
+        entity_name = None
+        
+        for keyword, cmd in commands.items():
+            if keyword in text_lower:
+                action = cmd
+                parts = text_lower.split(keyword)
+                if len(parts) > 1:
+                    entity_name = parts[1].strip()
+                    entity_name = entity_name.replace('la ', '').replace('il ', '').replace('lo ', '')
+                    entity_name = entity_name.replace('luce ', '').replace('luci ', '')
+                break
+        
+        if not action or not entity_name:
+            return None, None
+        
+        return action, entity_name
+    
+    def listen_and_execute(self):
+        """Ascolta un comando vocale ed esegue l'azione."""
+        if not self.is_enabled or self.is_listening:
+            return
+        
+        self.is_listening = True
+        
+        try:
+            # Beep di attivazione
+            winsound.Beep(800, 60)
+            safe_print("\n🎤 Ascolto attivo... Parla ora!")
+            
+            duration = 5
+            sample_rate = 16000
+            
+            try:
+                safe_print(f"⏺️  Registrazione in corso ({duration} secondi)...")
+                
+                audio_data = sd.rec(int(duration * sample_rate), 
+                                   samplerate=sample_rate, 
+                                   channels=1, 
+                                   dtype='int16')
+                sd.wait()
+                
+                safe_print("✓ Registrazione completata")
+                
+                max_amplitude = np.max(np.abs(audio_data))
+                if max_amplitude < 100:
+                    safe_print("⚠️  Audio troppo basso - microfono silenzioso?")
+                
+                audio_bytes = audio_data.tobytes()
+                audio = sr.AudioData(audio_bytes, sample_rate, 2)
+                
+                safe_print("🔍 Riconoscimento in corso (Google Speech)...")
+                text = self.recognizer.recognize_google(audio, language='it-IT')
+                
+                safe_print(f"✓ Riconosciuto: '{text}'")
+                
+                action, entity_name = self.parse_command(text)
+                
+                if action and entity_name:
+                    entity_id = voice_find_entity_by_name(self.entities, entity_name, self.current_room_lights, self.entity_domains)
+                    
+                    if entity_id:
+                        room_info = f" nella stanza {self.current_room}" if self.current_room else ""
+                        safe_print(f"→ Esecuzione: {action} su {entity_id}{room_info}")
+                        
+                        if voice_execute_command(self.ha_url, self.ha_token, entity_id, action):
+                            safe_print(f"✓ Comando eseguito con successo!")
+                            winsound.Beep(800, 60)
+                        else:
+                            safe_print(f"✗ Errore esecuzione comando")
+                            winsound.Beep(500, 150)
+                    else:
+                        room_info = f" nella stanza {self.current_room}" if self.current_room else ""
+                        safe_print(f"✗ Entità '{entity_name}' non trovata{room_info}")
+                        winsound.Beep(500, 150)
+                else:
+                    safe_print(f"✗ Comando non valido")
+                    winsound.Beep(500, 150)
+            
+            except sr.UnknownValueError:
+                safe_print("✗ Non ho capito, riprova")
+                winsound.Beep(500, 150)
+            except sr.RequestError as e:
+                safe_print(f"✗ Errore servizio Google: {e}")
+                winsound.Beep(500, 200)
+            except Exception as recogn_error:
+                safe_print(f"✗ Errore riconoscimento: {recogn_error}")
+                winsound.Beep(500, 200)
+        
+        except Exception as e:
+            safe_print(f"✗ Errore: {e}")
+        finally:
+            self.room_cache_time = time.time()
+            self.is_listening = False
+            safe_print("🎤 Ascolto disattivato\n")
+    
+    def toggle_enabled(self):
+        """Abilita/disabilita il controllo vocale."""
+        self.is_enabled = not self.is_enabled
+        status = "abilitato" if self.is_enabled else "disabilitato"
+        safe_print(f"Controllo vocale {status}")
+        return self.is_enabled
+
+
+class VoiceControlAgent:
+    """Agent per il controllo vocale, integrato in smart_proximity_control."""
+    
+    def __init__(self, ha_instances, ble_mapping=None, entity_domains=None, hotkey='ctrl+shift+i'):
+        self.ha_instances = ha_instances  # Lista di istanze HA
+        self.ble_mapping = ble_mapping
+        self.entity_domains = entity_domains or ['light']
+        self.hotkey = hotkey
+        self.is_running = False
+        self.controller = None
+        self._hotkey_registered = False
+    
+    def start(self):
+        """Avvia l'agent e registra la hotkey."""
+        if self.is_running:
+            return False
+        
+        try:
+            self.controller = VoiceController(self.ha_instances, self.ble_mapping, self.entity_domains)
+            
+            keyboard.add_hotkey(self.hotkey, self._on_hotkey, suppress=False)
+            self._hotkey_registered = True
+            self.is_running = True
+            
+            safe_print(f"✓ Voice Control Agent attivo (hotkey: {self.hotkey})")
+            return True
+            
+        except Exception as e:
+            safe_print(f"✗ Errore avvio Voice Control: {e}")
+            return False
+    
+    def stop(self):
+        """Ferma l'agent e rimuove la hotkey."""
+        if not self.is_running:
+            return
+        
+        try:
+            if self._hotkey_registered:
+                keyboard.remove_hotkey(self.hotkey)
+                self._hotkey_registered = False
+        except:
+            pass
+        
+        self.is_running = False
+        self.controller = None
+    
+    def _on_hotkey(self):
+        """Callback per la hotkey."""
+        if not self.is_running or not self.controller:
+            return
+        
+        safe_print("\n>>> Voice hotkey rilevata!")
+        
+        # Check connessione HA (lazy connect)
+        if not self.controller.is_connected:
+            safe_print("🔄 Tentativo connessione a Home Assistant...")
+            if not self.controller._try_connect():
+                safe_print("✗ Home Assistant non raggiungibile")
+                winsound.Beep(500, 200)
+                return
+        
+        if self.controller.ble_mapping:
+            threading.Thread(target=self._detect_and_listen, daemon=True).start()
+        else:
+            threading.Thread(target=self.controller.listen_and_execute, daemon=True).start()
+    
+    def _detect_and_listen(self):
+        """Rileva la stanza e poi avvia l'ascolto."""
+        self.controller.detect_room()
+        self.controller.listen_and_execute()
+    
+    def toggle_enabled(self):
+        """Abilita/disabilita l'ascolto."""
+        if self.controller:
+            return self.controller.toggle_enabled()
+        return False
+
+# =============================================================================
+# FINE VOICE CONTROL INTEGRATO
+# =============================================================================
 
 def test_ha_connection(url, token, timeout=3):
     """Test connection to a Home Assistant instance."""
@@ -205,7 +689,7 @@ def carica_configurazione(file_path='config.ini'):
         safe_print("url = http://your-home-assistant-ip:8123")
         safe_print("api_token = your_long_lived_access_token\n")
         safe_print("For more details, please read the README.md file.")
-        return None, None, None, None, None
+        return None, None, None, None, None, None
 
     config = configparser.ConfigParser()
     config.read(file_path)
@@ -220,11 +704,11 @@ def carica_configurazione(file_path='config.ini'):
         if not ha_url.startswith(('http://', 'https://')):
             safe_print(f"Error: URL must start with http:// or https://")
             safe_print(f"Current value: {ha_url}")
-            return None, None, None, None, None
+            return None, None, None, None, None, None
         
         if len(ha_token) < 50:
             safe_print(f"Error: API token seems too short. Make sure you're using a Long-Lived Access Token.")
-            return None, None, None, None, None
+            return None, None, None, None, None, None
         
         ha_instances.append({'url': ha_url, 'token': ha_token})
         
@@ -261,13 +745,23 @@ def carica_configurazione(file_path='config.ini'):
         entity_domains = config.get('filters', 'entity_domains', fallback='light,switch')
         entity_domains_list = [d.strip() for d in entity_domains.split(',')]
         
-        return ha_instances, app_title, icon_size, show_tooltips, entity_domains_list
+        # Impostazioni Voice Control (opzionali)
+        voice_config = {
+            'enabled': config.getboolean('home_assistant', 'voice_control', fallback=False),
+            'hotkey': config.get('home_assistant', 'voice_hotkey', fallback='ctrl+shift+i'),
+            'entity_domains': config.get('home_assistant', 'entity_domains', fallback='light').split(','),
+            'show_hotkey': config.get('home_assistant', 'show_hotkey', fallback='ctrl+shift+space'),
+            'quit_hotkey': config.get('home_assistant', 'quit_hotkey', fallback='ctrl+shift+q')
+        }
+        voice_config['entity_domains'] = [d.strip() for d in voice_config['entity_domains']]
+        
+        return ha_instances, app_title, icon_size, show_tooltips, entity_domains_list, voice_config
     except (configparser.NoSectionError, configparser.NoOptionError) as e:
         safe_print(f"Error: The configuration file '{file_path}' is invalid.")
         safe_print(f"Make sure it contains a [home_assistant] section with 'url' and 'api_token' keys.")
         safe_print(f"Error details: {e}")
         safe_print("\nPlease refer to README.md for configuration instructions.")
-        return None, None, None, None, None
+        return None, None, None, None, None, None
 
 def carica_mappatura_ble(file_path=BLE_ENTITY_FILE):
     """Carica la mappatura dei dispositivi BLE con gli ID area."""
@@ -1668,7 +2162,7 @@ if __name__ == "__main__":
         safe_print("  HAPY AGENT MODE ATTIVO")
         safe_print("="*60)
         safe_print("  Ctrl+Shift+Space: Mostra finestra")
-        safe_print("  Ctrl+Shift+E: Chiudi agent")
+        safe_print("  Ctrl+Shift+Q: Chiudi agent")
         safe_print("  ESC: Nascondi finestra")
         safe_print("  Timer: 10 secondi (si resetta ad ogni interazione)")
         safe_print("="*60 + "\\n")
@@ -1676,29 +2170,68 @@ if __name__ == "__main__":
         logger.info("=== Avvio Hapy ===")
 
     # Load configuration and exit if it fails
-    ha_instances, APP_TITLE, ICON_SIZE, SHOW_TOOLTIPS, ENTITY_DOMAINS = carica_configurazione('config.ini')
+    ha_instances, APP_TITLE, ICON_SIZE, SHOW_TOOLTIPS, ENTITY_DOMAINS, VOICE_CONFIG = carica_configurazione('config.ini')
     if not ha_instances:
         logger.error("Configurazione non valida, uscita")
         sys.exit(1)
     
     # Detect which Home Assistant instance is available
     HOME_ASSISTANT_URL, API_TOKEN = detect_available_instance(ha_instances, current_url=None)
-    if not HOME_ASSISTANT_URL or not API_TOKEN:
-        logger.error("Nessuna istanza di Home Assistant disponibile, uscita")
-        sys.exit(1)
     
-    logger.info(f"Connesso a Home Assistant: {HOME_ASSISTANT_URL}")
+    # In agent mode, continua anche senza connessione HA (lazy connect)
+    if not HOME_ASSISTANT_URL or not API_TOKEN:
+        if agent_mode:
+            logger.warning("Nessuna istanza di Home Assistant disponibile, continuo in modalità agent (lazy connect)")
+            safe_print("⚠️  Home Assistant non raggiungibile, riproverò quando invocato")
+            HOME_ASSISTANT_URL = None
+            API_TOKEN = None
+        else:
+            logger.error("Nessuna istanza di Home Assistant disponibile, uscita")
+            sys.exit(1)
+    else:
+        logger.info(f"Connesso a Home Assistant: {HOME_ASSISTANT_URL}")
+    
     logger.info(f"Domini entità da filtrare: {', '.join(ENTITY_DOMAINS)}")
 
     # These globals are now set only when the script is executed directly,
     # and only after we've confirmed the config files are valid.
-    HEADERS = {
-        "Authorization": f"Bearer {API_TOKEN}",
-        "Content-Type": "application/json",
-    }
+    if API_TOKEN:
+        HEADERS = {
+            "Authorization": f"Bearer {API_TOKEN}",
+            "Content-Type": "application/json",
+        }
+    else:
+        HEADERS = None
     
     # Registra funzione di cleanup
     atexit.register(cleanup)
+    
+    # Inizializza Voice Control Agent (solo in modalità agent)
+    voice_agent = None
+    
+    if agent_mode and VOICE_CONFIG.get('enabled', False):
+        safe_print("[DEBUG] Inizializzazione Voice Control Agent...")
+        try:
+            # Carica mappatura BLE per voice control
+            ble_mapping = load_voice_ble_mapping()
+            safe_print(f"[DEBUG] BLE mapping caricato: {ble_mapping is not None}")
+            
+            voice_agent = VoiceControlAgent(
+                ha_instances=ha_instances,  # Passa la lista di istanze per lazy connect
+                ble_mapping=ble_mapping,
+                entity_domains=VOICE_CONFIG.get('entity_domains', ['light']),
+                hotkey=VOICE_CONFIG.get('hotkey', 'ctrl+shift+i')
+            )
+            safe_print(f"[DEBUG] VoiceControlAgent creato: {voice_agent}")
+            safe_print(f"  {VOICE_CONFIG.get('hotkey', 'ctrl+shift+i').upper()}: Comando vocale")
+            logger.info("Voice Control Agent configurato")
+        except Exception as e:
+            import traceback
+            logger.error(f"Errore inizializzazione Voice Control: {e}")
+            safe_print(f"⚠️  Voice Control non disponibile: {e}")
+            safe_print(f"[DEBUG] Traceback: {traceback.format_exc()}")
+    elif agent_mode:
+        safe_print(f"[DEBUG] Voice Control non avviato: enabled={VOICE_CONFIG.get('enabled', False)}")
 
     # Run the application
     q_app = QApplication(sys.argv)
@@ -1709,14 +2242,15 @@ if __name__ == "__main__":
     main_window = HomeAssistantGUI(ha_instances, agent_mode=agent_mode)
     
     if agent_mode:
-        # In modalità agent, registra hotkey globali
+        # In modalità agent, registra hotkey globali (configurabili da config.ini)
+        show_hotkey = VOICE_CONFIG.get('show_hotkey', 'ctrl+shift+space')
+        quit_hotkey = VOICE_CONFIG.get('quit_hotkey', 'ctrl+shift+q')
         try:
-            keyboard.add_hotkey('ctrl+shift+space', main_window.trigger_show_and_scan, suppress=True)
-            keyboard.add_hotkey('ctrl+shift+q', main_window.trigger_quit, suppress=True)
-            logger.info("Hotkey Ctrl+Shift+Space e Ctrl+Shift+Q registrate correttamente")
+            keyboard.add_hotkey(show_hotkey, main_window.trigger_show_and_scan, suppress=True)
+            keyboard.add_hotkey(quit_hotkey, main_window.trigger_quit, suppress=True)
+            logger.info(f"Hotkey {show_hotkey} e {quit_hotkey} registrate correttamente")
             if sys.stdout:
-                safe_print("✓ Hotkey registrate correttamente!")
-                safe_print("  In attesa dei comandi...")
+                safe_print(f"✓ Hotkey registrate: {show_hotkey.upper()}, {quit_hotkey.upper()}")
                 sys.stdout.flush()
         except Exception as e:
             logger.error(f"Errore registrazione hotkey: {e}")
@@ -1725,6 +2259,23 @@ if __name__ == "__main__":
                 safe_print("  L'applicazione potrebbe richiedere privilegi di amministratore.")
                 safe_print("  Su Windows, esegui come Amministratore.\n")
                 sys.stdout.flush()
+        
+        # Avvia Voice Control Agent se configurato
+        safe_print(f"[DEBUG] voice_agent={voice_agent}")
+        if voice_agent:
+            safe_print("[DEBUG] Chiamata voice_agent.start()...")
+            result = voice_agent.start()
+            safe_print(f"[DEBUG] voice_agent.start() returned: {result}")
+            if result:
+                logger.info("Voice Control Agent avviato correttamente")
+                safe_print("✓ Voice Control Agent avviato!")
+            else:
+                logger.warning("Voice Control Agent non avviato")
+                safe_print("⚠️ Voice Control Agent non avviato")
+        else:
+            safe_print("[DEBUG] voice_agent è None, Voice Control non disponibile")
+        
+        safe_print("  In attesa dei comandi...")
     else:
         # In modalità normale, mostra la finestra subito
         main_window.show()
@@ -1735,10 +2286,14 @@ if __name__ == "__main__":
     # Cleanup hotkey
     if agent_mode:
         try:
-            keyboard.remove_hotkey('ctrl+shift+space')
-            keyboard.remove_hotkey('ctrl+shift+q')
+            keyboard.remove_hotkey(show_hotkey)
+            keyboard.remove_hotkey(quit_hotkey)
         except:
             pass
+        
+        # Ferma Voice Control Agent
+        if voice_agent:
+            voice_agent.stop()
     
     logger.info(f"=== Chiusura Hapy (exit code: {exit_code}) ===")
     sys.exit(exit_code)
