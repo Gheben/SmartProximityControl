@@ -99,6 +99,53 @@ def setup_logging():
     
     return logger
 
+def test_ha_connection(url, token, timeout=3):
+    """Test connection to a Home Assistant instance."""
+    try:
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        }
+        response = requests.get(f"{url}/api/", headers=headers, timeout=timeout)
+        if response.status_code == 200:
+            api_info = response.json()
+            safe_print(f"✓ Connected to Home Assistant at {url} (version {api_info.get('version', 'unknown')})")
+            return True
+        else:
+            safe_print(f"✗ Failed to connect to {url}: Status {response.status_code}")
+            return False
+    except requests.exceptions.RequestException as e:
+        safe_print(f"✗ Cannot reach {url}: {e}")
+        return False
+
+def detect_available_instance(ha_instances):
+    """Detects the first available Home Assistant instance from the list.
+    
+    Args:
+        ha_instances: List of dicts with 'url' and 'token' keys
+        
+    Returns:
+        Tuple (url, token) of the first available instance, or (None, None) if none available
+    """
+    if not ha_instances:
+        safe_print("Error: No Home Assistant instances configured")
+        return None, None
+    
+    safe_print(f"\nTesting {len(ha_instances)} Home Assistant instance(s)...")
+    
+    for i, instance in enumerate(ha_instances, 1):
+        url = instance['url']
+        token = instance['token']
+        safe_print(f"\nTesting instance {i}/{len(ha_instances)}: {url}")
+        
+        if test_ha_connection(url, token):
+            safe_print(f"\n✓ Using Home Assistant instance: {url}\n")
+            return url, token
+    
+    safe_print("\n✗ No Home Assistant instances are reachable!")
+    safe_print("Please check your network connection and configuration.\n")
+    return None, None
+
 def singleton():
     """Ensures that only one instance of the program is running."""
     lock_file_path = os.path.join(tempfile.gettempdir(), 'hapy.lock')
@@ -144,6 +191,10 @@ def carica_configurazione(file_path='config.ini'):
     config = configparser.ConfigParser()
     config.read(file_path)
     try:
+        # Carica tutte le istanze di Home Assistant (fino a 5)
+        ha_instances = []
+        
+        # Prima istanza (obbligatoria)
         ha_url = config.get('home_assistant', 'url')
         ha_token = config.get('home_assistant', 'api_token')
         
@@ -156,6 +207,34 @@ def carica_configurazione(file_path='config.ini'):
             safe_print(f"Error: API token seems too short. Make sure you're using a Long-Lived Access Token.")
             return None, None, None, None, None
         
+        ha_instances.append({'url': ha_url, 'token': ha_token})
+        
+        # Istanze aggiuntive (opzionali, da 2 a 5)
+        for i in range(2, 6):
+            try:
+                url_key = f'url_{i}'
+                token_key = f'api_token_{i}'
+                
+                url = config.get('home_assistant', url_key)
+                token = config.get('home_assistant', token_key)
+                
+                if url and token:
+                    if not url.startswith(('http://', 'https://')):
+                        safe_print(f"Warning: Instance {i} URL must start with http:// or https://, skipping")
+                        continue
+                    
+                    if len(token) < 50:
+                        safe_print(f"Warning: Instance {i} API token seems too short, skipping")
+                        continue
+                    
+                    ha_instances.append({'url': url, 'token': token})
+                    safe_print(f"✓ Loaded Home Assistant instance {i}: {url}")
+            except (configparser.NoOptionError, configparser.NoSectionError):
+                # Istanza non configurata, continua
+                pass
+        
+        safe_print(f"Total Home Assistant instances configured: {len(ha_instances)}")
+        
         app_title = config.get('gui', 'title', fallback='hapy')
         icon_size = config.getint('gui', 'icon_size', fallback=48)
         show_tooltips = config.getboolean('gui', 'show_tooltips', fallback=True)
@@ -163,13 +242,13 @@ def carica_configurazione(file_path='config.ini'):
         entity_domains = config.get('filters', 'entity_domains', fallback='light,switch')
         entity_domains_list = [d.strip() for d in entity_domains.split(',')]
         
-        return ha_url, ha_token, app_title, icon_size, show_tooltips, entity_domains_list
+        return ha_instances, app_title, icon_size, show_tooltips, entity_domains_list
     except (configparser.NoSectionError, configparser.NoOptionError) as e:
         safe_print(f"Error: The configuration file '{file_path}' is invalid.")
         safe_print(f"Make sure it contains a [home_assistant] section with 'url' and 'api_token' keys.")
         safe_print(f"Error details: {e}")
         safe_print("\nPlease refer to README.md for configuration instructions.")
-        return None, None, None, None, None, None
+        return None, None, None, None, None
 
 def carica_mappatura_ble(file_path=BLE_ENTITY_FILE):
     """Carica la mappatura dei dispositivi BLE con gli ID area."""
@@ -385,10 +464,16 @@ async def ble_scanner_task(ble_mapping, callback, stop_event, single_scan=False)
             else:
                 logger.info("Nessun dispositivo BLE target rilevato")
                 safe_print("Nessun dispositivo nelle vicinanze")
+                # Se è una scansione singola e non trova dispositivi, notifica comunque
+                if single_scan:
+                    callback(None)
                 
         except Exception as e:
             logger.error(f"Errore durante la scansione BLE: {e}")
             safe_print(f"Errore scansione BLE: {e}")
+            # Notifica errore in caso di scansione singola
+            if single_scan:
+                callback(None)
         
         if single_scan or stop_event.is_set():
             return
@@ -742,10 +827,17 @@ class HomeAssistantGUI(QWidget):
         self.dragging = False
         self.drag_position = None
         
+        # System tray icon per modalità agent
+        self.tray_icon = None
+        
         # Connetti il signal allo slot
         self.area_detected_signal.connect(self.update_area_entities)
 
         self.init_ui()
+        
+        # Crea system tray icon in modalità agent
+        if agent_mode:
+            self.create_system_tray()
         
         if not agent_mode:
             # Modalità normale: avvia subito la scansione
@@ -850,6 +942,50 @@ class HomeAssistantGUI(QWidget):
         bottom_layout.addWidget(powered_by_label, alignment=Qt.AlignmentFlag.AlignRight)
         
         self.main_layout.addLayout(bottom_layout)
+
+    def create_system_tray(self):
+        """Crea l'icona nella system tray per la modalità agent."""
+        base_path = get_base_path()
+        icon_path = os.path.join(base_path, 'logo_gb.ico')
+        
+        logger.info(f"Creazione system tray icon. Path icona: {icon_path}")
+        logger.info(f"Icona esiste: {os.path.exists(icon_path)}")
+        
+        if os.path.exists(icon_path):
+            self.tray_icon = QSystemTrayIcon(QIcon(icon_path), self)
+            logger.info("Tray icon creata con logo_gb.ico")
+        else:
+            # Usa un'icona di default se non trova logo_gb.ico
+            self.tray_icon = QSystemTrayIcon(self)
+            logger.warning("logo_gb.ico non trovato, uso icona di default")
+        
+        # Crea menu contestuale
+        tray_menu = QMenu()
+        
+        show_action = tray_menu.addAction("Mostra finestra")
+        show_action.triggered.connect(self.show_and_scan)
+        
+        tray_menu.addSeparator()
+        
+        quit_action = tray_menu.addAction("Esci")
+        quit_action.triggered.connect(QApplication.instance().quit)
+        
+        self.tray_icon.setContextMenu(tray_menu)
+        self.tray_icon.setToolTip(APP_TITLE)
+        
+        # Doppio click sulla tray icon mostra la finestra
+        self.tray_icon.activated.connect(self._on_tray_activated)
+        
+        # IMPORTANTE: mostra esplicitamente il tray icon
+        self.tray_icon.show()
+        self.tray_icon.setVisible(True)
+        
+        logger.info(f"System tray icon mostrata. Visible: {self.tray_icon.isVisible()}")
+    
+    def _on_tray_activated(self, reason):
+        """Gestisce il click sull'icona del system tray."""
+        if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
+            self.show_and_scan()
 
     def start_ble_scanner(self, single_scan=False):
         """Avvia lo scanner BLE in un thread separato.
@@ -991,17 +1127,17 @@ class HomeAssistantGUI(QWidget):
         logger.info(f"update_area_entities chiamato con area_id: {area_id}")
         logger.info(f"entities_loaded flag: {self.entities_loaded}")
         
-        # Reset flag scansione
+        # Reset flag scansione (sempre, anche se area_id è None)
         self.is_scanning = False
         
-        if self.entities_loaded and self.current_area_id == area_id:
-            logger.info("Entità già caricate per questa area, uscita")
-            return
-
         if area_id is None:
             self.clear_entities()
             self.status_label.setText("No BLE device detected")
-            logger.warning("area_id è None")
+            logger.warning("area_id è None - nessun dispositivo trovato")
+            return
+        
+        if self.entities_loaded and self.current_area_id == area_id:
+            logger.info("Entità già caricate per questa area, uscita")
             return
 
         self.current_area_id = area_id
@@ -1224,15 +1360,24 @@ class HomeAssistantGUI(QWidget):
         # Use the correct enum access for PyQt6
         if key == Qt.Key.Key_Escape:
             if self.agent_mode:
-                # In modalità agent, ESC nasconde la finestra usando auto_hide per attivare il cleanup timer
+                # In modalità agent, ESC nasconde la finestra usando hide() direttamente
                 logger.info("ESC premuto: nascondo finestra")
                 if self.auto_hide_timer:
                     self.auto_hide_timer.stop()
                     self.auto_hide_timer = None
-                self.auto_hide()  # Usa auto_hide invece di hide() per attivare il cleanup timer
+                self.hide()  # Nascondi direttamente senza chiamare close()
+                # Avvia timer di cleanup
+                if self.entity_widgets:
+                    logger.info("Avvio timer di cleanup (10 secondi)")
+                    if self.cleanup_timer:
+                        self.cleanup_timer.stop()
+                    self.cleanup_timer = QTimer(self)
+                    self.cleanup_timer.timeout.connect(self.cleanup_devices)
+                    self.cleanup_timer.setSingleShot(True)
+                    self.cleanup_timer.start(10000)
             else:
                 # In modalità normale, ESC chiude l'applicazione
-                self.close()
+                QApplication.instance().quit()
         elif key == Qt.Key.Key_Right:
             self.navigate(1)
         elif key == Qt.Key.Key_Left:
@@ -1310,6 +1455,35 @@ class HomeAssistantGUI(QWidget):
             is_focused = (i == self.current_focus_index)
             # Enable shadow on focus, disable otherwise
             widget.shadow.setEnabled(is_focused)
+    
+    def closeEvent(self, event):
+        """Gestisce la chiusura della finestra (click su X)."""
+        if self.agent_mode:
+            # In modalità agent, nasconde invece di chiudere
+            logger.info("closeEvent: nascondo finestra invece di chiudere")
+            event.ignore()
+            self.hide()
+            if self.tray_icon:
+                self.tray_icon.showMessage(
+                    APP_TITLE,
+                    "L'applicazione continua in background. Usa Ctrl+Shift+Space per mostrarla.",
+                    QSystemTrayIcon.MessageIcon.Information,
+                    2000
+                )
+            # Avvia timer di cleanup
+            if self.entity_widgets:
+                logger.info("Avvio timer di cleanup (10 secondi) da closeEvent")
+                if self.cleanup_timer:
+                    self.cleanup_timer.stop()
+                self.cleanup_timer = QTimer(self)
+                self.cleanup_timer.timeout.connect(self.cleanup_devices)
+                self.cleanup_timer.setSingleShot(True)
+                self.cleanup_timer.start(10000)
+        else:
+            # In modalità normale, chiude l'applicazione
+            event.accept()
+            QApplication.instance().quit()
+
 
 class StateUpdateEvent(QEvent):
     """A custom event to carry state update data."""
@@ -1369,9 +1543,28 @@ if __name__ == "__main__":
         if os.path.exists(config_path):
             config.read(config_path)
             try:
+                # Carica tutte le istanze
+                ha_instances = []
                 ha_url = config.get('home_assistant', 'url')
                 ha_token = config.get('home_assistant', 'api_token')
-                get_area_ids(ha_url, ha_token)
+                ha_instances.append({'url': ha_url, 'token': ha_token})
+                
+                # Aggiungi istanze opzionali
+                for i in range(2, 6):
+                    try:
+                        url = config.get('home_assistant', f'url_{i}')
+                        token = config.get('home_assistant', f'api_token_{i}')
+                        if url and token:
+                            ha_instances.append({'url': url, 'token': token})
+                    except (configparser.NoOptionError, configparser.NoSectionError):
+                        pass
+                
+                # Rileva istanza disponibile
+                active_url, active_token = detect_available_instance(ha_instances)
+                if active_url and active_token:
+                    get_area_ids(active_url, active_token)
+                else:
+                    safe_print("Nessuna istanza Home Assistant disponibile!")
             except (configparser.NoSectionError, configparser.NoOptionError) as e:
                 safe_print(f"Errore configurazione: {e}")
                 safe_print("Assicurati che config.ini contenga [home_assistant] con 'url' e 'api_token'")
@@ -1405,11 +1598,18 @@ if __name__ == "__main__":
         logger.info("=== Avvio Hapy ===")
 
     # Load configuration and exit if it fails
-    HOME_ASSISTANT_URL, API_TOKEN, APP_TITLE, ICON_SIZE, SHOW_TOOLTIPS, ENTITY_DOMAINS = carica_configurazione('config.ini')
-    if not HOME_ASSISTANT_URL or not API_TOKEN:
+    ha_instances, APP_TITLE, ICON_SIZE, SHOW_TOOLTIPS, ENTITY_DOMAINS = carica_configurazione('config.ini')
+    if not ha_instances:
         logger.error("Configurazione non valida, uscita")
         sys.exit(1)
     
+    # Detect which Home Assistant instance is available
+    HOME_ASSISTANT_URL, API_TOKEN = detect_available_instance(ha_instances)
+    if not HOME_ASSISTANT_URL or not API_TOKEN:
+        logger.error("Nessuna istanza di Home Assistant disponibile, uscita")
+        sys.exit(1)
+    
+    logger.info(f"Connesso a Home Assistant: {HOME_ASSISTANT_URL}")
     logger.info(f"Domini entità da filtrare: {', '.join(ENTITY_DOMAINS)}")
 
     # These globals are now set only when the script is executed directly,

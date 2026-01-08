@@ -1,6 +1,21 @@
 [home_assistant]
+# Primary Home Assistant instance
 url = http://YOUR-HOME-ASSISTANT-IP:8123
 api_token = YOUR_LONG_LIVED_ACCESS_TOKEN
+
+# Optional: Additional Home Assistant instances (up to 4 more)
+# The application will automatically connect to the first available instance
+# url_2 = http://OFFICE-HOME-ASSISTANT-IP:8123
+# api_token_2 = OFFICE_LONG_LIVED_ACCESS_TOKEN
+
+# url_3 = http://REMOTE-HOME-ASSISTANT-IP:8123
+# api_token_3 = REMOTE_LONG_LIVED_ACCESS_TOKEN
+
+# url_4 = http://LOCATION4-HOME-ASSISTANT-IP:8123
+# api_token_4 = LOCATION4_LONG_LIVED_ACCESS_TOKEN
+
+# url_5 = http://LOCATION5-HOME-ASSISTANT-IP:8123
+# api_token_5 = LOCATION5_LONG_LIVED_ACCESS_TOKEN
 
 [ui]
 title = Smart Proximity Control
