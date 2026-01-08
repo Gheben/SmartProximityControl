@@ -118,11 +118,12 @@ def test_ha_connection(url, token, timeout=3):
         safe_print(f"✗ Cannot reach {url}: {e}")
         return False
 
-def detect_available_instance(ha_instances):
+def detect_available_instance(ha_instances, current_url=None):
     """Detects the first available Home Assistant instance from the list.
     
     Args:
         ha_instances: List of dicts with 'url' and 'token' keys
+        current_url: The currently connected URL (optional). If provided, it will be tested first.
         
     Returns:
         Tuple (url, token) of the first available instance, or (None, None) if none available
@@ -133,9 +134,27 @@ def detect_available_instance(ha_instances):
     
     safe_print(f"\nTesting {len(ha_instances)} Home Assistant instance(s)...")
     
+    # Se abbiamo un URL corrente, testalo per primo
+    if current_url:
+        for instance in ha_instances:
+            if instance['url'] == current_url:
+                safe_print(f"\nTesting current instance: {current_url}")
+                if test_ha_connection(current_url, instance['token'], timeout=2):
+                    safe_print(f"\n✓ Current instance still available: {current_url}\n")
+                    return current_url, instance['token']
+                else:
+                    safe_print(f"\n✗ Current instance {current_url} no longer available, trying others...")
+                break
+    
+    # Testa tutte le istanze
     for i, instance in enumerate(ha_instances, 1):
         url = instance['url']
         token = instance['token']
+        
+        # Salta l'istanza corrente se già testata
+        if url == current_url:
+            continue
+            
         safe_print(f"\nTesting instance {i}/{len(ha_instances)}: {url}")
         
         if test_ha_connection(url, token):
@@ -673,7 +692,7 @@ class EntityWidget(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 10, 8, 12)  # Più margine in basso
         layout.setSpacing(8)  # Più spazio tra icona e testo
-        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)  # Allinea in alto e centro orizzontale
 
         self.icon_label = QLabel()
         # Use the correct enum access for PyQt6
@@ -683,9 +702,9 @@ class EntityWidget(QWidget):
         alias_label = QLabel(item.get('alias', self.entity_id))
         alias_label.setWordWrap(True)
         alias_label.setMaximumWidth(ICON_SIZE + 40)  # Larghezza maggiore per il testo
-        alias_label.setMinimumHeight(30)  # Altezza minima per non tagliare il testo
+        alias_label.setMinimumHeight(36)  # Altezza minima per 3 righe di testo
         # Use the correct enum access for PyQt6
-        alias_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        alias_label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)  # Testo allineato in alto
         alias_label.setStyleSheet("""
             color: #ecf0f1;
             font-size: 8pt;
@@ -807,7 +826,7 @@ class HomeAssistantGUI(QWidget):
     """The main application window - Agent mode."""
     area_detected_signal = Signal(str)
     
-    def __init__(self, agent_mode=False):
+    def __init__(self, ha_instances, agent_mode=False):
         super().__init__()
         self.agent_mode = agent_mode
         self.entities = []
@@ -822,6 +841,12 @@ class HomeAssistantGUI(QWidget):
         self.auto_hide_timer = None
         self.cleanup_timer = None
         self.is_scanning = False
+        
+        # Variabili per gestire connessione e riconnessione
+        self.ha_instances = ha_instances  # Lista delle istanze configurate
+        self.current_ha_url = HOME_ASSISTANT_URL
+        self.current_ha_token = API_TOKEN
+        self.current_headers = HEADERS.copy()
         
         # Variabili per drag-and-drop
         self.dragging = False
@@ -986,6 +1011,48 @@ class HomeAssistantGUI(QWidget):
         """Gestisce il click sull'icona del system tray."""
         if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
             self.show_and_scan()
+    
+    def reconnect_to_available_instance(self):
+        """Riconnette all'istanza Home Assistant disponibile.
+        Ritorna True se ha trovato un'istanza disponibile, False altrimenti.
+        """
+        logger.info("Verifica disponibilità istanza Home Assistant...")
+        
+        # Usa detect_available_instance passando l'URL corrente
+        new_url, new_token = detect_available_instance(self.ha_instances, self.current_ha_url)
+        
+        if new_url and new_token:
+            # Controlla se l'istanza è cambiata
+            if new_url != self.current_ha_url:
+                logger.info(f"Cambio istanza: {self.current_ha_url} -> {new_url}")
+                safe_print(f"Cambio istanza: {new_url}")
+                
+                # Aggiorna le variabili di istanza
+                self.current_ha_url = new_url
+                self.current_ha_token = new_token
+                self.current_headers = {
+                    "Authorization": f"Bearer {new_token}",
+                    "Content-Type": "application/json",
+                }
+                
+                # Aggiorna anche le variabili globali per compatibilità
+                global HOME_ASSISTANT_URL, API_TOKEN, HEADERS
+                HOME_ASSISTANT_URL = new_url
+                API_TOKEN = new_token
+                HEADERS = self.current_headers.copy()
+                
+                # Pulisce i dispositivi in memoria dato che l'istanza è cambiata
+                self.clear_entities()
+                self.entities_loaded = False
+                self.current_area_id = None
+            else:
+                logger.info(f"Istanza corrente ancora disponibile: {new_url}")
+            
+            return True
+        else:
+            logger.error("Nessuna istanza Home Assistant disponibile")
+            safe_print("✗ Nessuna istanza disponibile")
+            return False
 
     def start_ble_scanner(self, single_scan=False):
         """Avvia lo scanner BLE in un thread separato.
@@ -1039,23 +1106,27 @@ class HomeAssistantGUI(QWidget):
             self.cleanup_timer.stop()
             self.cleanup_timer = None
         
-        # Verifica se ci sono dispositivi già caricati in memoria
+        # Mostra la finestra
+        self.show()
+        self.setWindowState(self.windowState() & ~Qt.WindowState.WindowMinimized | Qt.WindowState.WindowActive)
+        self.raise_()
+        self.activateWindow()
+        
+        # Verifica connessione prima di usare i dispositivi in memoria
+        if not self.reconnect_to_available_instance():
+            self.status_label.setText("Error: No Home Assistant instance available")
+            self.clear_entities()
+            return
+        
+        # Verifica se ci sono dispositivi già caricati in memoria e l'istanza è la stessa
         if self.entity_widgets and self.entities_loaded:
             logger.info("Dispositivi ancora in memoria, riutilizzo senza scansione")
             safe_print(">>> Dispositivi in memoria: mostro senza scansionare")
-            # Mostra la finestra con i dispositivi esistenti
-            self.show()
-            self.setWindowState(self.windowState() & ~Qt.WindowState.WindowMinimized | Qt.WindowState.WindowActive)
-            self.raise_()
-            self.activateWindow()
+            # I dispositivi sono già mostrati, non serve scansione
         else:
             # Nessun dispositivo in memoria, scansiona normalmente
             logger.info("Nessun dispositivo in memoria, avvio scansione")
             safe_print(">>> Finestra mostrata, avvio scansione BLE...")
-            self.show()
-            self.setWindowState(self.windowState() & ~Qt.WindowState.WindowMinimized | Qt.WindowState.WindowActive)
-            self.raise_()
-            self.activateWindow()
             # Avvia scansione singola
             self.start_ble_scanner(single_scan=True)
         
@@ -1142,6 +1213,13 @@ class HomeAssistantGUI(QWidget):
 
         self.current_area_id = area_id
         logger.info(f"Recupero informazioni area: {area_id}")
+        
+        # Prova a riconnettere se necessario
+        if not self.reconnect_to_available_instance():
+            self.status_label.setText("Error: No Home Assistant instance available")
+            self.clear_entities()
+            return
+        
         area_info = get_area_info(area_id)
         area_name = area_info['name']
         logger.info(f"Nome area: {area_name}")
@@ -1560,7 +1638,7 @@ if __name__ == "__main__":
                         pass
                 
                 # Rileva istanza disponibile
-                active_url, active_token = detect_available_instance(ha_instances)
+                active_url, active_token = detect_available_instance(ha_instances, current_url=None)
                 if active_url and active_token:
                     get_area_ids(active_url, active_token)
                 else:
@@ -1604,7 +1682,7 @@ if __name__ == "__main__":
         sys.exit(1)
     
     # Detect which Home Assistant instance is available
-    HOME_ASSISTANT_URL, API_TOKEN = detect_available_instance(ha_instances)
+    HOME_ASSISTANT_URL, API_TOKEN = detect_available_instance(ha_instances, current_url=None)
     if not HOME_ASSISTANT_URL or not API_TOKEN:
         logger.error("Nessuna istanza di Home Assistant disponibile, uscita")
         sys.exit(1)
@@ -1628,7 +1706,7 @@ if __name__ == "__main__":
     # Set the application name for better OS integration
     q_app.setApplicationName(APP_TITLE)
     
-    main_window = HomeAssistantGUI(agent_mode=agent_mode)
+    main_window = HomeAssistantGUI(ha_instances, agent_mode=agent_mode)
     
     if agent_mode:
         # In modalità agent, registra hotkey globali
