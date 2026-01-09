@@ -43,5 +43,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['logo_gb.ico'],
+    icon=['Smart_Proximity_Control.ico'],
 )

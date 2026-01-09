@@ -46,7 +46,7 @@ Automatic control system for Home Assistant entities based on BLE (Bluetooth Low
 - 💾 **Device memory** (10 seconds) for fast reopening
 - 🚀 **Agent mode** for automatic background startup
 - 📦 **Standalone executable** without Python dependencies
-- 🎨 **Custom icon** (logo_gb.ico) in window and taskbar
+- 🎨 **Custom icon** (Smart_Proximity_Control.ico) in window and taskbar
 - 🌐 **Multi-instance support** - Auto-connect to available Home Assistant
 - 🔌 **Lazy connection** - Works even when HA is offline at startup
 

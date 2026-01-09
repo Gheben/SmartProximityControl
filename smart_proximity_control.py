@@ -1535,7 +1535,7 @@ class HomeAssistantGUI(QWidget):
         
         # Imposta l'icona della finestra
         base_path = get_base_path()
-        icon_path = os.path.join(base_path, 'logo_gb.ico')
+        icon_path = os.path.join(base_path, 'Smart_Proximity_Control.ico')
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
         
@@ -1627,18 +1627,18 @@ class HomeAssistantGUI(QWidget):
     def create_system_tray(self):
         """Crea l'icona nella system tray per la modalità agent."""
         base_path = get_base_path()
-        icon_path = os.path.join(base_path, 'logo_gb.ico')
+        icon_path = os.path.join(base_path, 'Smart_Proximity_Control.ico')
         
         logger.info(f"Creazione system tray icon. Path icona: {icon_path}")
         logger.info(f"Icona esiste: {os.path.exists(icon_path)}")
         
         if os.path.exists(icon_path):
             self.tray_icon = QSystemTrayIcon(QIcon(icon_path), self)
-            logger.info("Tray icon creata con logo_gb.ico")
+            logger.info("Tray icon creata con Smart_Proximity_Control.ico")
         else:
-            # Usa un'icona di default se non trova logo_gb.ico
+            # Usa un'icona di default se non trova Smart_Proximity_Control.ico
             self.tray_icon = QSystemTrayIcon(self)
-            logger.warning("logo_gb.ico non trovato, uso icona di default")
+            logger.warning("Smart_Proximity_Control.ico non trovato, uso icona di default")
         
         # Crea menu contestuale
         tray_menu = QMenu()

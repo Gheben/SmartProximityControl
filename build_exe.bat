@@ -33,7 +33,7 @@ echo PyInstaller trovato. Creazione eseguibile in corso...
 echo.
 
 REM Crea l'eseguibile usando il Python del venv
-.venv\Scripts\pyinstaller.exe --onefile --windowed --name "SmartProximityControl" --icon=logo_gb.ico smart_proximity_control.py
+.venv\Scripts\pyinstaller.exe --onefile --windowed --name "SmartProximityControl" --icon=Smart_Proximity_Control.ico smart_proximity_control.py
 
 if %errorlevel% neq 0 (
     echo.
@@ -53,7 +53,7 @@ echo PROSSIMI PASSI:
 echo 1. Crea una cartella di installazione (es: C:\en\scripts\Smart Proximity Control\)
 echo 2. Copia questi file nella cartella:
 echo    - dist\SmartProximityControl.exe
-echo    - logo_gb.ico
+echo    - Smart_Proximity_Control.ico
 echo    - config.ini
 echo    - ble_entity.json
 echo 3. Per l'avvio automatico, leggi BUILD_EXE.md
