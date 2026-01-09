@@ -242,6 +242,7 @@ This project is based on the original [hapy](https://github.com/gianlucaromito/h
 
 **Major enhancements and features added:**
 - 🎤 Voice control with BLE room detection and Google Speech Recognition (Italian + English)
+- 🔗 **Multiple commands support** - Execute multiple actions in one sentence ("turn off lights and turn on leds")
 - ⚙️ Settings GUI with tray menu integration for easy configuration
 - 📡 BLE beacon management via GUI (add/remove beacon associations)
 - 💡 Smart LED control with simple voice commands ("turn on led")

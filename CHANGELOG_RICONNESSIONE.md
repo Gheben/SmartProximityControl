@@ -1,5 +1,53 @@
 # Changelog - Riconnessione Automatica
 
+## [2026-01-09] - Supporto Comandi Vocali Multipli
+
+### Nuova Funzionalità: Comandi Multipli in Una Frase
+
+**Problema risolto:**
+Il sistema vocale riconosceva correttamente frasi come "Spegni tutte le luci e accendi tutti i led" ma eseguiva solo la prima parte del comando.
+
+**Implementazione:**
+
+1. **Nuova funzione `split_multiple_commands()`**
+   - Divide il testo riconosciuto in comandi multipli quando contiene " e " o " and "
+   - Supporta sia italiano che inglese
+   - Usa regex per evitare falsi positivi (`\s+e\s+|\s+and\s+`)
+
+2. **Modificata `listen_and_execute()`**
+   - Dopo il riconoscimento vocale, divide automaticamente il testo in comandi multipli
+   - Mostra il numero di comandi rilevati
+   - Esegue ogni comando separatamente in sequenza
+   - Fornisce feedback per ogni comando quando sono multipli
+
+3. **Nuova funzione `_execute_single_command()`**
+   - Contiene la logica di esecuzione estratta e riutilizzabile
+   - Gestisce gruppi (`all_lights`, `led_lights`) e singole entità
+   - Viene chiamata per ogni comando della lista
+
+**Esempi di utilizzo:**
+- "Spegni tutte le luci e accendi tutti i led"
+- "Chiudi la tapparella e spegni la luce"
+- "Turn off lights and open cover"
+
+**Output esempio:**
+```
+✓ Riconosciuto: 'Spegni tutte le luci e accendi tutti i led'
+📋 Rilevati 2 comandi da eseguire
+
+--- Comando 1/2: 'Spegni tutte le luci' ---
+→ Esecuzione: turn_off su TUTTE LE LUCI nella stanza Soggiorno
+✓ 3/3 luci controllate con successo!
+
+--- Comando 2/2: 'accendi tutti i led' ---
+→ Esecuzione: turn_on su LUCI LED nella stanza Soggiorno
+✓ 2/2 luci LED controllate con successo!
+
+✓ Completati tutti i 2 comandi!
+```
+
+---
+
 ## Problema Risolto
 
 Quando l'applicazione era aperta nella system tray e l'utente si spostava in un'altra rete WiFi con un'altra istanza di Home Assistant:

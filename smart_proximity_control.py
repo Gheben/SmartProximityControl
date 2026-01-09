@@ -449,6 +449,20 @@ class VoiceController:
             self.current_room_lights = []
             self.room_cache_time = None
     
+    def split_multiple_commands(self, text):
+        """Divide il testo in comandi multipli se contiene 'e' o 'and'.
+        Esempi:
+        - "Spegni tutte le luci e accendi tutti i led" -> ["Spegni tutte le luci", "accendi tutti i led"]
+        - "Turn off lights and open cover" -> ["Turn off lights", "open cover"]
+        """
+        import re
+        # Divide su ' e ' (con spazi) per italiano o ' and ' per inglese
+        # Usa regex per evitare falsi positivi (es. "led" non deve dividere)
+        separators = r'\s+e\s+|\s+and\s+'
+        commands = re.split(separators, text, flags=re.IGNORECASE)
+        # Rimuovi spazi e ritorna solo comandi non vuoti
+        return [cmd.strip() for cmd in commands if cmd.strip()]
+    
     def parse_command(self, text):
         """Analizza il comando vocale e determina azione ed entità.
         Supporta comandi speciali per gruppi:
@@ -576,99 +590,30 @@ class VoiceController:
                 
                 safe_print(f"✓ Riconosciuto: '{text}'")
                 
-                action, entity_name = self.parse_command(text)
+                # Dividi in comandi multipli se presenti
+                commands = self.split_multiple_commands(text)
                 
-                if action and entity_name:
-                    # Gestione comandi di gruppo
-                    if entity_name == 'all_lights':
-                        if not self.current_room:
-                            safe_print(f"✗ Nessuna stanza rilevata! Esegui prima una scansione BLE.")
-                            play_beep(500, 150)
-                        elif not self.current_room_lights:
-                            safe_print(f"✗ Stanza {self.current_room_name} rilevata, ma nessuna luce configurata in Home Assistant per questa area.")
-                            play_beep(500, 150)
-                        else:
-                            room_info = f" nella stanza {self.current_room_name}" if self.current_room_name else ""
-                            safe_print(f"→ Esecuzione: {action} su TUTTE LE LUCI{room_info}")
-                            
-                            # Filtra solo le entità della stanza escludendo quelle con "led" nel nome
-                            lights_to_control = []
-                            
-                            for entity in self.current_room_lights:
-                                entity_id = entity.get('entity_id', '')
-                                friendly_name = entity.get('attributes', {}).get('friendly_name', '')
-                                
-                                # Escludi entità con "led" nel nome
-                                if entity_id.startswith('light.') and 'led' not in friendly_name.lower() and 'led' not in entity_id.lower():
-                                    lights_to_control.append(entity_id)
-                            
-                            if lights_to_control:
-                                success_count = 0
-                                for light_id in lights_to_control:
-                                    if voice_execute_command(self.ha_url, self.ha_token, light_id, action):
-                                        success_count += 1
-                                
-                                safe_print(f"✓ {success_count}/{len(lights_to_control)} luci controllate con successo!")
-                                play_beep(800, 60)
-                            else:
-                                safe_print(f"✗ Nessuna luce (non-LED) trovata{room_info}")
-                                play_beep(500, 150)
+                if len(commands) > 1:
+                    safe_print(f"📋 Rilevati {len(commands)} comandi da eseguire")
+                
+                # Esegui ogni comando separatamente
+                for idx, cmd_text in enumerate(commands, 1):
+                    if len(commands) > 1:
+                        safe_print(f"\n--- Comando {idx}/{len(commands)}: '{cmd_text}' ---")
                     
-                    elif entity_name == 'led_lights':
-                        if not self.current_room:
-                            safe_print(f"✗ Nessuna stanza rilevata! Esegui prima una scansione BLE.")
-                            play_beep(500, 150)
-                        elif not self.current_room_lights:
-                            safe_print(f"✗ Stanza {self.current_room_name} rilevata, ma nessuna luce configurata in Home Assistant per questa area.")
-                            play_beep(500, 150)
-                        else:
-                            room_info = f" nella stanza {self.current_room_name}" if self.current_room_name else ""
-                            safe_print(f"→ Esecuzione: {action} su LUCI LED{room_info}")
-                            
-                            # Filtra solo le entità LED della stanza
-                            led_lights = []
-                            
-                            for entity in self.current_room_lights:
-                                entity_id = entity.get('entity_id', '')
-                                friendly_name = entity.get('attributes', {}).get('friendly_name', '')
-                                
-                                # Include solo entità con "led" nel nome
-                                if entity_id.startswith('light.') and ('led' in friendly_name.lower() or 'led' in entity_id.lower()):
-                                    led_lights.append(entity_id)
-                            
-                            if led_lights:
-                                success_count = 0
-                                for light_id in led_lights:
-                                    if voice_execute_command(self.ha_url, self.ha_token, light_id, action):
-                                        success_count += 1
-                                
-                                safe_print(f"✓ {success_count}/{len(led_lights)} luci LED controllate con successo!")
-                                play_beep(800, 60)
-                            else:
-                                safe_print(f"✗ Nessuna luce LED trovata{room_info}")
-                                play_beep(500, 150)
+                    action, entity_name = self.parse_command(cmd_text)
                     
-                    # Gestione normale per singola entità
-                    else:
-                        entity_id = voice_find_entity_by_name(self.entities, entity_name, self.current_room_lights, self.entity_domains)
-                        
-                        if entity_id:
-                            room_info = f" nella stanza {self.current_room_name}" if self.current_room_name else ""
-                            safe_print(f"→ Esecuzione: {action} su {entity_id}{room_info}")
-                            
-                            if voice_execute_command(self.ha_url, self.ha_token, entity_id, action):
-                                safe_print(f"✓ Comando eseguito con successo!")
-                                play_beep(800, 60)
-                            else:
-                                safe_print(f"✗ Errore esecuzione comando")
-                                play_beep(500, 150)
-                        else:
-                            room_info = f" nella stanza {self.current_room_name}" if self.current_room_name else ""
-                            safe_print(f"✗ Entità '{entity_name}' non trovata{room_info}")
-                            play_beep(500, 150)
-                else:
-                    safe_print(f"✗ Comando non valido")
-                    play_beep(500, 150)
+                    if not action or not entity_name:
+                        safe_print(f"✗ Comando '{cmd_text}' non valido")
+                        play_beep(500, 150)
+                        continue
+                
+                    # Esegui il comando
+                    self._execute_single_command(action, entity_name)
+                
+                # Messaggio finale solo se comandi multipli
+                if len(commands) > 1:
+                    safe_print(f"\n✓ Completati tutti i {len(commands)} comandi!")
             
             except sr.UnknownValueError:
                 safe_print("✗ Non ho capito, riprova")
@@ -686,6 +631,96 @@ class VoiceController:
             self.room_cache_time = time.time()
             self.is_listening = False
             safe_print("🎤 Ascolto disattivato\n")
+    
+    def _execute_single_command(self, action, entity_name):
+        """Esegue un singolo comando vocale."""
+        # Gestione comandi di gruppo
+        if entity_name == 'all_lights':
+            if not self.current_room:
+                safe_print(f"✗ Nessuna stanza rilevata! Esegui prima una scansione BLE.")
+                play_beep(500, 150)
+            elif not self.current_room_lights:
+                safe_print(f"✗ Stanza {self.current_room_name} rilevata, ma nessuna luce configurata in Home Assistant per questa area.")
+                play_beep(500, 150)
+            else:
+                room_info = f" nella stanza {self.current_room_name}" if self.current_room_name else ""
+                safe_print(f"→ Esecuzione: {action} su TUTTE LE LUCI{room_info}")
+                
+                # Filtra solo le entità della stanza escludendo quelle con "led" nel nome
+                lights_to_control = []
+                
+                for entity in self.current_room_lights:
+                    entity_id = entity.get('entity_id', '')
+                    friendly_name = entity.get('attributes', {}).get('friendly_name', '')
+                    
+                    # Escludi entità con "led" nel nome
+                    if entity_id.startswith('light.') and 'led' not in friendly_name.lower() and 'led' not in entity_id.lower():
+                        lights_to_control.append(entity_id)
+                
+                if lights_to_control:
+                    success_count = 0
+                    for light_id in lights_to_control:
+                        if voice_execute_command(self.ha_url, self.ha_token, light_id, action):
+                            success_count += 1
+                    
+                    safe_print(f"✓ {success_count}/{len(lights_to_control)} luci controllate con successo!")
+                    play_beep(800, 60)
+                else:
+                    safe_print(f"✗ Nessuna luce (non-LED) trovata{room_info}")
+                    play_beep(500, 150)
+        
+        elif entity_name == 'led_lights':
+            if not self.current_room:
+                safe_print(f"✗ Nessuna stanza rilevata! Esegui prima una scansione BLE.")
+                play_beep(500, 150)
+            elif not self.current_room_lights:
+                safe_print(f"✗ Stanza {self.current_room_name} rilevata, ma nessuna luce configurata in Home Assistant per questa area.")
+                play_beep(500, 150)
+            else:
+                room_info = f" nella stanza {self.current_room_name}" if self.current_room_name else ""
+                safe_print(f"→ Esecuzione: {action} su LUCI LED{room_info}")
+                
+                # Filtra solo le entità LED della stanza
+                led_lights = []
+                
+                for entity in self.current_room_lights:
+                    entity_id = entity.get('entity_id', '')
+                    friendly_name = entity.get('attributes', {}).get('friendly_name', '')
+                    
+                    # Include solo entità con "led" nel nome
+                    if entity_id.startswith('light.') and ('led' in friendly_name.lower() or 'led' in entity_id.lower()):
+                        led_lights.append(entity_id)
+                
+                if led_lights:
+                    success_count = 0
+                    for light_id in led_lights:
+                        if voice_execute_command(self.ha_url, self.ha_token, light_id, action):
+                            success_count += 1
+                    
+                    safe_print(f"✓ {success_count}/{len(led_lights)} luci LED controllate con successo!")
+                    play_beep(800, 60)
+                else:
+                    safe_print(f"✗ Nessuna luce LED trovata{room_info}")
+                    play_beep(500, 150)
+        
+        # Gestione normale per singola entità
+        else:
+            entity_id = voice_find_entity_by_name(self.entities, entity_name, self.current_room_lights, self.entity_domains)
+            
+            if entity_id:
+                room_info = f" nella stanza {self.current_room_name}" if self.current_room_name else ""
+                safe_print(f"→ Esecuzione: {action} su {entity_id}{room_info}")
+                
+                if voice_execute_command(self.ha_url, self.ha_token, entity_id, action):
+                    safe_print(f"✓ Comando eseguito con successo!")
+                    play_beep(800, 60)
+                else:
+                    safe_print(f"✗ Errore esecuzione comando")
+                    play_beep(500, 150)
+            else:
+                room_info = f" nella stanza {self.current_room_name}" if self.current_room_name else ""
+                safe_print(f"✗ Entità '{entity_name}' non trovata{room_info}")
+                play_beep(500, 150)
     
     def toggle_enabled(self):
         """Abilita/disabilita il controllo vocale."""

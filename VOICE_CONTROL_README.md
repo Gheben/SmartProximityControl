@@ -10,6 +10,7 @@ Controllo vocale **push-to-talk** per Home Assistant - Non interferisce con micr
 - 🔊 **Feedback Audio**: Beep per confermare attivazione/successo/errore
 - 🏠 **Multi-Istanza**: Riusa config.ini per supportare più istanze HA
 - 📱 **Tray Icon**: Menu contestuale per gestire il servizio
+- 🔗 **Comandi Multipli**: Esegui più azioni in una sola frase (es. "spegni luci e accendi led")
 
 ## 🚀 Come Funziona
 
@@ -55,6 +56,14 @@ pyinstaller --noconsole --onefile --icon=logo_gb.ico voice_control.py
 ```
 
 ## 🎤 Comandi Supportati
+
+### Comandi Multipli ⭐ NUOVO!
+Puoi dare **più comandi in una sola frase** separandoli con "**e**" o "**and**":
+- "**spegni tutte le luci e accendi tutti i led**"
+- "**chiudi la tapparella e spegni la luce**"
+- "**accendi luce cucina e apri tapparella soggiorno**"
+
+Il sistema eseguirà ogni comando in sequenza automaticamente!
 
 ### Luci e Interruttori
 - "**accendi** luce soggiorno"
