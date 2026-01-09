@@ -78,6 +78,12 @@ ICONS_MAP = {
 
 BLE_ENTITY_FILE = 'ble_entity.json'
 
+def play_beep(frequency, duration):
+    """Riproduce un beep solo se i suoni sono abilitati."""
+    # Controlla se la variabile globale esiste e se è true
+    if 'SOUNDS_ENABLED' in globals() and globals()['SOUNDS_ENABLED']:
+        winsound.Beep(frequency, duration)
+
 def setup_logging():
     """Sets up a rotating file logger with console output."""
     base_path = get_base_path()
@@ -142,16 +148,29 @@ def load_voice_ble_mapping():
         return None
 
 async def voice_detect_current_room(ble_mapping, scan_duration=3):
-    """Rileva la stanza corrente basandosi sui beacon BLE visibili."""
+    """Rileva la stanza corrente basandosi sul beacon BLE con segnale più forte."""
     try:
-        devices = await BleakScanner.discover(timeout=scan_duration)
+        devices = await BleakScanner.discover(timeout=scan_duration, return_adv=True)
         
-        for device in devices:
+        strongest_device = None
+        strongest_rssi = -1000
+        strongest_room = None
+        
+        for device, adv_data in devices.values():
             mac = device.address.upper()
             if mac in ble_mapping:
-                room = ble_mapping[mac]
-                safe_print(f"📍 Beacon trovato: {device.name or mac} → {room}")
-                return room
+                rssi = adv_data.rssi
+                safe_print(f"📍 Beacon: {device.name or mac} → RSSI: {rssi}")
+                
+                if rssi > strongest_rssi:
+                    strongest_rssi = rssi
+                    strongest_device = device
+                    strongest_room = ble_mapping[mac]
+        
+        if strongest_room:
+            mac = strongest_device.address.upper()
+            safe_print(f"📍 Beacon più forte: {strongest_device.name or mac} → {strongest_room} (RSSI: {strongest_rssi})")
+            return strongest_room
         
         return None
             
@@ -292,7 +311,7 @@ def voice_execute_command(ha_url, ha_token, entity_id, action):
 class VoiceController:
     """Controller principale per il riconoscimento vocale."""
     
-    def __init__(self, ha_instances, ble_mapping, entity_domains=None):
+    def __init__(self, ha_instances, ble_mapping, entity_domains=None, group_lights_control=False):
         self.ha_instances = ha_instances  # Lista di istanze HA
         self.ha_url = None
         self.ha_token = None
@@ -301,7 +320,9 @@ class VoiceController:
         self.is_listening = False
         self.ble_mapping = ble_mapping
         self.entity_domains = entity_domains or ['light']
+        self.group_lights_control = group_lights_control
         self.current_room = None
+        self.current_room_name = None
         self.current_room_lights = []
         self.room_cache_time = None
         self.room_cache_duration = 15
@@ -335,6 +356,7 @@ class VoiceController:
         """Rileva la stanza corrente tramite BLE e carica le sue luci."""
         if not self.ble_mapping:
             self.current_room = None
+            self.current_room_name = None
             self.current_room_lights = []
             return
         
@@ -343,7 +365,7 @@ class VoiceController:
             elapsed = time.time() - self.room_cache_time
             if elapsed < self.room_cache_duration:
                 remaining = int(self.room_cache_duration - elapsed)
-                safe_print(f"📍 Uso stanza in cache: {self.current_room} (ancora {remaining}s)")
+                safe_print(f"📍 Uso stanza in cache: {self.current_room_name} (ancora {remaining}s)")
                 if self.current_room_lights:
                     light_names = [e.get('attributes', {}).get('friendly_name', e['entity_id']) 
                                   for e in self.current_room_lights]
@@ -355,15 +377,20 @@ class VoiceController:
             
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            self.current_room = loop.run_until_complete(
+            area_id = loop.run_until_complete(
                 voice_detect_current_room(self.ble_mapping, scan_duration=3)
             )
             loop.close()
             
-            if self.current_room:
-                safe_print(f"📍 Stanza rilevata: {self.current_room}")
+            if area_id:
+                # Recupera il nome friendly dell'area
+                area_info = get_area_info(area_id)
+                self.current_room = area_id  # Salva l'ID per le query
+                self.current_room_name = area_info['name']  # Salva il nome per la visualizzazione
+                
+                safe_print(f"📍 Stanza rilevata: {self.current_room_name}")
                 self.current_room_lights = voice_get_entities_in_area(
-                    self.ha_url, self.ha_token, self.current_room, 
+                    self.ha_url, self.ha_token, area_id, 
                     domain_filter=self.entity_domains
                 )
                 if self.current_room_lights:
@@ -371,23 +398,31 @@ class VoiceController:
                                   for e in self.current_room_lights]
                     safe_print(f"💡 {len(self.current_room_lights)} luci trovate: {', '.join(light_names)}")
                 else:
-                    safe_print(f"⚠️  Nessuna luce trovata nella stanza {self.current_room}")
+                    safe_print(f"⚠️  Nessuna luce trovata nella stanza {self.current_room_name}")
             else:
                 safe_print("⚠️  Nessuna stanza rilevata")
+                self.current_room = None
+                self.current_room_name = None
                 self.current_room_lights = []
                 self.room_cache_time = None
                 
         except Exception as e:
             safe_print(f"✗ Errore rilevamento stanza: {e}")
             self.current_room = None
+            self.current_room_name = None
             self.current_room_lights = []
             self.room_cache_time = None
     
     def parse_command(self, text):
-        """Analizza il comando vocale e determina azione ed entità."""
+        """Analizza il comando vocale e determina azione ed entità.
+        Supporta comandi speciali per gruppi:
+        - 'tutte le luci' / 'le luci' / 'all lights' -> gruppo 'all_lights'
+        - 'luce led' / 'luci led' / 'led lights' -> gruppo 'led_lights'
+        """
         text_lower = text.lower().strip()
         
         commands = {
+            # Italiano
             'accendi': 'turn_on',
             'accenda': 'turn_on',
             'attiva': 'turn_on',
@@ -396,11 +431,43 @@ class VoiceController:
             'disattiva': 'turn_off',
             'apri': 'open_cover',
             'chiudi': 'close_cover',
+            # Inglese
+            'turn on': 'turn_on',
+            'switch on': 'turn_on',
+            'turn off': 'turn_off',
+            'switch off': 'turn_off',
+            'open': 'open_cover',
+            'close': 'close_cover',
         }
         
         action = None
         entity_name = None
         
+        # Controlla prima i comandi di gruppo (se abilitati)
+        if self.group_lights_control:
+            # Pattern per "tutte le luci" o generico "le luci" (IT + EN)
+            if any(phrase in text_lower for phrase in [
+                # Italiano
+                'tutte le luci', 'tutte le luce', 'tutte luci', 'le luci', 'la luce',
+                # Inglese
+                'all lights', 'all the lights', 'the lights', 'lights'
+            ]):
+                for keyword, cmd in commands.items():
+                    if keyword in text_lower:
+                        return cmd, 'all_lights'
+            
+            # Pattern per "luce led" / "luci led" (IT + EN)
+            if any(phrase in text_lower for phrase in [
+                # Italiano
+                'luce led', 'luci led', 'le led', 'i led',
+                # Inglese
+                'led lights', 'led light', 'the led', 'leds'
+            ]):
+                for keyword, cmd in commands.items():
+                    if keyword in text_lower:
+                        return cmd, 'led_lights'
+        
+        # Parsing normale per singole entità
         for keyword, cmd in commands.items():
             if keyword in text_lower:
                 action = cmd
@@ -424,8 +491,11 @@ class VoiceController:
         self.is_listening = True
         
         try:
+            # Rileva prima la stanza tramite BLE
+            self.detect_room()
+            
             # Beep di attivazione
-            winsound.Beep(800, 60)
+            play_beep(800, 60)
             safe_print("\n🎤 Ascolto attivo... Parla ora!")
             
             duration = 5
@@ -457,35 +527,100 @@ class VoiceController:
                 action, entity_name = self.parse_command(text)
                 
                 if action and entity_name:
-                    entity_id = voice_find_entity_by_name(self.entities, entity_name, self.current_room_lights, self.entity_domains)
-                    
-                    if entity_id:
-                        room_info = f" nella stanza {self.current_room}" if self.current_room else ""
-                        safe_print(f"→ Esecuzione: {action} su {entity_id}{room_info}")
-                        
-                        if voice_execute_command(self.ha_url, self.ha_token, entity_id, action):
-                            safe_print(f"✓ Comando eseguito con successo!")
-                            winsound.Beep(800, 60)
+                    # Gestione comandi di gruppo
+                    if entity_name == 'all_lights':
+                        if not self.current_room_lights:
+                            safe_print(f"✗ Nessuna stanza rilevata! Esegui prima una scansione BLE.")
+                            play_beep(500, 150)
                         else:
-                            safe_print(f"✗ Errore esecuzione comando")
-                            winsound.Beep(500, 150)
+                            room_info = f" nella stanza {self.current_room_name}" if self.current_room_name else ""
+                            safe_print(f"→ Esecuzione: {action} su TUTTE LE LUCI{room_info}")
+                            
+                            # Filtra solo le entità della stanza escludendo quelle con "led" nel nome
+                            lights_to_control = []
+                            
+                            for entity in self.current_room_lights:
+                                entity_id = entity.get('entity_id', '')
+                                friendly_name = entity.get('attributes', {}).get('friendly_name', '')
+                                
+                                # Escludi entità con "led" nel nome
+                                if entity_id.startswith('light.') and 'led' not in friendly_name.lower() and 'led' not in entity_id.lower():
+                                    lights_to_control.append(entity_id)
+                            
+                            if lights_to_control:
+                                success_count = 0
+                                for light_id in lights_to_control:
+                                    if voice_execute_command(self.ha_url, self.ha_token, light_id, action):
+                                        success_count += 1
+                                
+                                safe_print(f"✓ {success_count}/{len(lights_to_control)} luci controllate con successo!")
+                                play_beep(800, 60)
+                            else:
+                                safe_print(f"✗ Nessuna luce (non-LED) trovata{room_info}")
+                                play_beep(500, 150)
+                    
+                    elif entity_name == 'led_lights':
+                        if not self.current_room_lights:
+                            safe_print(f"✗ Nessuna stanza rilevata! Esegui prima una scansione BLE.")
+                            play_beep(500, 150)
+                        else:
+                            room_info = f" nella stanza {self.current_room_name}" if self.current_room_name else ""
+                            safe_print(f"→ Esecuzione: {action} su LUCI LED{room_info}")
+                            
+                            # Filtra solo le entità LED della stanza
+                            led_lights = []
+                            
+                            for entity in self.current_room_lights:
+                                entity_id = entity.get('entity_id', '')
+                                friendly_name = entity.get('attributes', {}).get('friendly_name', '')
+                                
+                                # Include solo entità con "led" nel nome
+                                if entity_id.startswith('light.') and ('led' in friendly_name.lower() or 'led' in entity_id.lower()):
+                                    led_lights.append(entity_id)
+                            
+                            if led_lights:
+                                success_count = 0
+                                for light_id in led_lights:
+                                    if voice_execute_command(self.ha_url, self.ha_token, light_id, action):
+                                        success_count += 1
+                                
+                                safe_print(f"✓ {success_count}/{len(led_lights)} luci LED controllate con successo!")
+                                play_beep(800, 60)
+                            else:
+                                safe_print(f"✗ Nessuna luce LED trovata{room_info}")
+                                play_beep(500, 150)
+                    
+                    # Gestione normale per singola entità
                     else:
-                        room_info = f" nella stanza {self.current_room}" if self.current_room else ""
-                        safe_print(f"✗ Entità '{entity_name}' non trovata{room_info}")
-                        winsound.Beep(500, 150)
+                        entity_id = voice_find_entity_by_name(self.entities, entity_name, self.current_room_lights, self.entity_domains)
+                        
+                        if entity_id:
+                            room_info = f" nella stanza {self.current_room_name}" if self.current_room_name else ""
+                            safe_print(f"→ Esecuzione: {action} su {entity_id}{room_info}")
+                            
+                            if voice_execute_command(self.ha_url, self.ha_token, entity_id, action):
+                                safe_print(f"✓ Comando eseguito con successo!")
+                                play_beep(800, 60)
+                            else:
+                                safe_print(f"✗ Errore esecuzione comando")
+                                play_beep(500, 150)
+                        else:
+                            room_info = f" nella stanza {self.current_room_name}" if self.current_room_name else ""
+                            safe_print(f"✗ Entità '{entity_name}' non trovata{room_info}")
+                            play_beep(500, 150)
                 else:
                     safe_print(f"✗ Comando non valido")
-                    winsound.Beep(500, 150)
+                    play_beep(500, 150)
             
             except sr.UnknownValueError:
                 safe_print("✗ Non ho capito, riprova")
-                winsound.Beep(500, 150)
+                play_beep(500, 150)
             except sr.RequestError as e:
                 safe_print(f"✗ Errore servizio Google: {e}")
-                winsound.Beep(500, 200)
+                play_beep(500, 200)
             except Exception as recogn_error:
                 safe_print(f"✗ Errore riconoscimento: {recogn_error}")
-                winsound.Beep(500, 200)
+                play_beep(500, 200)
         
         except Exception as e:
             safe_print(f"✗ Errore: {e}")
@@ -505,8 +640,9 @@ class VoiceController:
 class VoiceControlAgent:
     """Agent per il controllo vocale, integrato in smart_proximity_control."""
     
-    def __init__(self, ha_instances, ble_mapping=None, entity_domains=None, hotkey='ctrl+shift+i'):
+    def __init__(self, ha_instances, ble_mapping=None, entity_domains=None, hotkey='ctrl+shift+i', group_lights_control=False):
         self.ha_instances = ha_instances  # Lista di istanze HA
+        self.group_lights_control = group_lights_control
         self.ble_mapping = ble_mapping
         self.entity_domains = entity_domains or ['light']
         self.hotkey = hotkey
@@ -520,7 +656,7 @@ class VoiceControlAgent:
             return False
         
         try:
-            self.controller = VoiceController(self.ha_instances, self.ble_mapping, self.entity_domains)
+            self.controller = VoiceController(self.ha_instances, self.ble_mapping, self.entity_domains, self.group_lights_control)
             
             keyboard.add_hotkey(self.hotkey, self._on_hotkey, suppress=False)
             self._hotkey_registered = True
@@ -560,7 +696,7 @@ class VoiceControlAgent:
             safe_print("🔄 Tentativo connessione a Home Assistant...")
             if not self.controller._try_connect():
                 safe_print("✗ Home Assistant non raggiungibile")
-                winsound.Beep(500, 200)
+                play_beep(500, 200)
                 return
         
         if self.controller.ble_mapping:
@@ -689,7 +825,7 @@ def carica_configurazione(file_path='config.ini'):
         safe_print("url = http://your-home-assistant-ip:8123")
         safe_print("api_token = your_long_lived_access_token\n")
         safe_print("For more details, please read the README.md file.")
-        return None, None, None, None, None, None
+        return None, None, None, None, None, None, None
 
     config = configparser.ConfigParser()
     config.read(file_path)
@@ -750,18 +886,22 @@ def carica_configurazione(file_path='config.ini'):
             'enabled': config.getboolean('home_assistant', 'voice_control', fallback=False),
             'hotkey': config.get('home_assistant', 'voice_hotkey', fallback='ctrl+shift+i'),
             'entity_domains': config.get('home_assistant', 'entity_domains', fallback='light').split(','),
+            'group_lights_control': config.getboolean('home_assistant', 'group_lights_control', fallback=False),
             'show_hotkey': config.get('home_assistant', 'show_hotkey', fallback='ctrl+shift+space'),
             'quit_hotkey': config.get('home_assistant', 'quit_hotkey', fallback='ctrl+shift+q')
         }
         voice_config['entity_domains'] = [d.strip() for d in voice_config['entity_domains']]
         
-        return ha_instances, app_title, icon_size, show_tooltips, entity_domains_list, voice_config
+        # Impostazione suoni
+        enable_sounds = config.getboolean('home_assistant', 'enable_sounds', fallback=True)
+        
+        return ha_instances, app_title, icon_size, show_tooltips, entity_domains_list, voice_config, enable_sounds
     except (configparser.NoSectionError, configparser.NoOptionError) as e:
         safe_print(f"Error: The configuration file '{file_path}' is invalid.")
         safe_print(f"Make sure it contains a [home_assistant] section with 'url' and 'api_token' keys.")
         safe_print(f"Error details: {e}")
         safe_print("\nPlease refer to README.md for configuration instructions.")
-        return None, None, None, None, None, None
+        return None, None, None, None, None, None, None
 
 def carica_mappatura_ble(file_path=BLE_ENTITY_FILE):
     """Carica la mappatura dei dispositivi BLE con gli ID area."""
@@ -804,8 +944,30 @@ def get_area_info(area_id):
                         'name': area.get('name', area_id),
                         'id': area_id
                     }
+            # Area non trovata nel registry
+            return {'name': area_id, 'id': area_id}
         
-        return {'name': area_id, 'id': area_id}
+        elif response.status_code == 404:
+            # API area_registry non disponibile, usa template Jinja2
+            logger.info(f"Area registry API not available, using template for area {area_id}")
+            template_url = f"{HOME_ASSISTANT_URL}/api/template"
+            
+            # Ottieni il nome dell'area usando il template
+            name_template = f"{{{{ area_name('{area_id}') }}}}"
+            name_response = requests.post(template_url, headers=HEADERS,
+                                         json={"template": name_template}, timeout=5)
+            
+            if name_response.status_code == 200:
+                area_name = name_response.text.strip()
+                # Se il template ritorna l'area_id stesso, l'area non esiste
+                if area_name and area_name != area_id:
+                    return {'name': area_name, 'id': area_id}
+            
+            return {'name': area_id, 'id': area_id}
+        
+        else:
+            logger.warning(f"Unexpected status code {response.status_code} from area_registry")
+            return {'name': area_id, 'id': area_id}
         
     except Exception as e:
         logger.error(f"Error getting area info: {e}")
@@ -2152,7 +2314,7 @@ if __name__ == "__main__":
         sys.exit(1) # Use exit code 1 to indicate error/already running
     
     # These variables need to be available to the whole script
-    global HOME_ASSISTANT_URL, API_TOKEN, APP_TITLE, ICON_SIZE, SHOW_TOOLTIPS, ENTITY_DOMAINS, HEADERS, logger
+    global HOME_ASSISTANT_URL, API_TOKEN, APP_TITLE, ICON_SIZE, SHOW_TOOLTIPS, ENTITY_DOMAINS, HEADERS, logger, SOUNDS_ENABLED
 
     # Setup logging first
     logger = setup_logging()
@@ -2170,10 +2332,13 @@ if __name__ == "__main__":
         logger.info("=== Avvio Hapy ===")
 
     # Load configuration and exit if it fails
-    ha_instances, APP_TITLE, ICON_SIZE, SHOW_TOOLTIPS, ENTITY_DOMAINS, VOICE_CONFIG = carica_configurazione('config.ini')
+    ha_instances, APP_TITLE, ICON_SIZE, SHOW_TOOLTIPS, ENTITY_DOMAINS, VOICE_CONFIG, ENABLE_SOUNDS = carica_configurazione('config.ini')
     if not ha_instances:
         logger.error("Configurazione non valida, uscita")
         sys.exit(1)
+    
+    # Imposta la variabile globale per i suoni
+    SOUNDS_ENABLED = ENABLE_SOUNDS
     
     # Detect which Home Assistant instance is available
     HOME_ASSISTANT_URL, API_TOKEN = detect_available_instance(ha_instances, current_url=None)
@@ -2220,7 +2385,8 @@ if __name__ == "__main__":
                 ha_instances=ha_instances,  # Passa la lista di istanze per lazy connect
                 ble_mapping=ble_mapping,
                 entity_domains=VOICE_CONFIG.get('entity_domains', ['light']),
-                hotkey=VOICE_CONFIG.get('hotkey', 'ctrl+shift+i')
+                hotkey=VOICE_CONFIG.get('hotkey', 'ctrl+shift+i'),
+                group_lights_control=VOICE_CONFIG.get('group_lights_control', False)
             )
             safe_print(f"[DEBUG] VoiceControlAgent creato: {voice_agent}")
             safe_print(f"  {VOICE_CONFIG.get('hotkey', 'ctrl+shift+i').upper()}: Comando vocale")

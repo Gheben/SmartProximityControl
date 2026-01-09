@@ -128,9 +128,17 @@ show_tooltips = true
 - `voice_control = true` - Enable voice control in agent mode
 - `voice_hotkey` - Hotkey to activate voice listening
 - `entity_domains` (under `[home_assistant]`) - Entity types controllable by voice
+- `group_lights_control = true` - Enable group light commands (see below)
 - Voice recognition uses Google Speech Recognition (requires internet)
 - Automatically detects current room via BLE before executing commands
 - Supported commands: "Accendi [luce]", "Spegni [luce]", "Apri [tapparella]", "Chiudi [tapparella]"
+
+**Group Light Control (when enabled):**
+- **"Accendi/Spegni tutte le luci"** - Controls ALL lights in the room EXCEPT LEDs
+- **"Accendi/Spegni luci led"** - Controls ONLY LED lights in the room
+- Entities are filtered by `friendly_name` or `entity_id` containing "led"
+- Provides feedback on how many lights were successfully controlled
+- Example: "✓ 3/4 luci controllate con successo!"
 
 4. Configure `ble_entity.json`:
 ```json

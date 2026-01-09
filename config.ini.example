@@ -22,6 +22,11 @@ voice_control = false
 voice_hotkey = ctrl+shift+i
 # Entity domains for voice control (comma separated: light, switch, cover, fan, etc.)
 entity_domains = light
+# Enable voice control for light groups (all lights, LED lights)
+group_lights_control = false
+
+# Sound notifications
+enable_sounds = true
 
 # Agent mode hotkeys (customizable)
 show_hotkey = ctrl+shift+space
