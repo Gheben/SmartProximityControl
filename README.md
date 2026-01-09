@@ -212,6 +212,28 @@ This project is based on the original [hapy](https://github.com/gianlucaromito/h
 
 Special thanks to the original author for the foundational work!
 
+---
+
+## 👨‍💻 Author
+
+**Guido Ballarini**
+
+💼 **LinkedIn:** [Guido Ballarini](https://www.linkedin.com/in/guido-ballarini/)  
+☕ **Buy Me a Coffee:** [guidoballau](https://buymeacoffee.com/guidoballau)
+
+## 💖 Support the Project
+
+If you find this project useful, consider buying me a coffee! ☕
+
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-Support%20-yellow.svg?logo=buy-me-a-coffee&logoColor=white)](https://buymeacoffee.com/guidoballau)
+[![PayPal](https://img.shields.io/badge/PayPal-Donate-blue.svg?logo=paypal)](https://www.paypal.com/donate/?hosted_button_id=8RF28JBPLYASN)
+
+⭐ **If you like the project, leave a star on GitHub!** ⭐
+
+---
+
+Made with ❤️ by **Guido Ballarini** - © 2026
+
 ## License
 
 MIT
