@@ -33,7 +33,7 @@ echo PyInstaller trovato. Creazione eseguibile in corso...
 echo.
 
 REM Crea l'eseguibile usando il Python del venv
-.venv\Scripts\pyinstaller.exe --onefile --windowed --name "SmartProximityControl" --icon=Smart_Proximity_Control.ico smart_proximity_control.py
+.venv\Scripts\pyinstaller.exe --onefile --windowed --name "SmartProximityControl" --icon=Smart_Proximity_Control.ico --add-data "config.ini;." --add-data "ble_entity.json;." --add-data "Smart_Proximity_Control.ico;." smart_proximity_control.py
 
 if %errorlevel% neq 0 (
     echo.

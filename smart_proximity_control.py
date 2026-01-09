@@ -24,7 +24,8 @@ import winsound
 
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QLabel, QVBoxLayout, QHBoxLayout, 
-    QFrame, QGraphicsDropShadowEffect, QSystemTrayIcon, QMenu
+    QFrame, QGraphicsDropShadowEffect, QSystemTrayIcon, QMenu,
+    QScrollArea, QLineEdit, QCheckBox, QSpinBox, QPushButton, QStyle
 )
 from PyQt6.QtGui import QPixmap, QImage, QPainter, QTransform, QCursor, QIcon
 from PyQt6.QtSvg import QSvgRenderer
@@ -131,13 +132,20 @@ def load_voice_ble_mapping():
         with open(ble_file, 'r', encoding='utf-8') as f:
             mapping = json.load(f)
         
-        # Estrai la mappatura BLE (MAC -> area)
+        # Supporta sia formato vecchio (entities) che nuovo (ble_mapping)
         ble_mapping = {}
-        for entity in mapping.get('entities', []):
-            mac = entity.get('mac')
-            area = entity.get('area')
-            if mac and area:
-                ble_mapping[mac.upper()] = area
+        
+        # Formato nuovo: {"ble_mapping": {"MAC": "area"}}
+        if 'ble_mapping' in mapping:
+            ble_mapping = {mac.upper(): area for mac, area in mapping['ble_mapping'].items()}
+        
+        # Formato vecchio: {"entities": [{"mac": "...", "area": "..."}]}
+        elif 'entities' in mapping:
+            for entity in mapping.get('entities', []):
+                mac = entity.get('mac')
+                area = entity.get('area')
+                if mac and area:
+                    ble_mapping[mac.upper()] = area
         
         if ble_mapping:
             safe_print(f"✓ Caricata mappatura BLE: {len(ble_mapping)} dispositivi")
@@ -194,47 +202,72 @@ def voice_get_all_entities(ha_url, ha_token):
         return []
 
 def voice_get_entities_in_area(ha_url, ha_token, area_id, domain_filter=None):
-    """Recupera tutte le entità appartenenti a una specifica area/stanza."""
+    """Recupera tutte le entità appartenenti a una specifica area/stanza usando API template."""
     try:
         headers = {
             "Authorization": f"Bearer {ha_token}",
             "Content-Type": "application/json",
         }
         
-        # Ottieni tutte le entità
-        response = requests.get(f"{ha_url}/api/states", headers=headers, timeout=5)
+        safe_print(f"🔍 Cerco entità per area_id: '{area_id}', domini: {domain_filter}")
+        
+        # Usa Jinja2 template per ottenere le entità dell'area
+        # area_entities() restituisce tutte le entità (anche quelle assegnate via device)
+        template = f"{{{{ area_entities('{area_id}') }}}}"
+        
+        response = requests.post(
+            f"{ha_url}/api/template",
+            headers=headers,
+            json={"template": template},
+            timeout=5
+        )
+        
         if response.status_code != 200:
+            safe_print(f"✗ Errore API template: {response.status_code}")
             return []
         
-        all_entities = response.json()
+        # L'API template restituisce il risultato come stringa, non come JSON array
+        # Se il template è area_entities(), restituisce una stringa come "['light.led1', 'light.led2']"
+        result_text = response.text.strip().strip('"')  # Rimuovi virgolette esterne se presenti
         
-        # Ottieni il registry delle entità per trovare l'area
-        entity_reg_url = f"{ha_url}/api/config/entity_registry"
-        entity_reg_response = requests.get(entity_reg_url, headers=headers, timeout=5)
-        
-        if entity_reg_response.status_code != 200:
+        # Converte la stringa Python list in una vera lista Python
+        import ast
+        try:
+            entity_ids_in_area = ast.literal_eval(result_text)
+            if not isinstance(entity_ids_in_area, list):
+                entity_ids_in_area = []
+        except (ValueError, SyntaxError):
+            safe_print(f"✗ Errore parsing risposta template: {result_text}")
             return []
         
-        entity_registry = entity_reg_response.json()
+        safe_print(f"📊 Template ha trovato {len(entity_ids_in_area)} entità nell'area '{area_id}'")
         
-        # Filtra le entità per area e dominio
+        # Filtra per dominio se specificato
+        if domain_filter:
+            filtered_ids = [eid for eid in entity_ids_in_area 
+                          if eid.split('.')[0] in domain_filter]
+            safe_print(f"📊 Dopo filtro domini {domain_filter}: {len(filtered_ids)} entità")
+        else:
+            filtered_ids = entity_ids_in_area
+        
+        # Ottieni gli stati delle entità filtrate
+        states_response = requests.get(f"{ha_url}/api/states", headers=headers, timeout=5)
+        if states_response.status_code != 200:
+            safe_print(f"✗ Errore API states: {states_response.status_code}")
+            return []
+        
+        all_entities = states_response.json()
+        
+        # Trova le entità corrispondenti
         entities_in_area = []
+        matched_entities = []
         for entity in all_entities:
-            entity_id = entity['entity_id']
-            
-            # Filtra per dominio se specificato
-            if domain_filter:
-                domain = entity_id.split('.')[0]
-                if domain not in domain_filter:
-                    continue
-            
-            # Cerca nell'entity registry
-            for reg_entity in entity_registry:
-                if reg_entity.get('entity_id') == entity_id:
-                    if reg_entity.get('area_id') == area_id:
-                        entities_in_area.append(entity)
-                        break
+            if entity['entity_id'] in filtered_ids:
+                entities_in_area.append(entity)
+                friendly_name = entity.get('attributes', {}).get('friendly_name', entity['entity_id'])
+                matched_entities.append(f"{entity['entity_id']} ({friendly_name})")
         
+        safe_print(f"✓ Trovate {len(entities_in_area)} entità nell'area '{area_id}': {matched_entities}")
         return entities_in_area
         
     except Exception as e:
@@ -325,7 +358,7 @@ class VoiceController:
         self.current_room_name = None
         self.current_room_lights = []
         self.room_cache_time = None
-        self.room_cache_duration = 15
+        self.room_cache_duration = 30  # Aumentato a 30s per dare tempo al voice command (registrazione 5s + riconoscimento ~2s)
         self.recognizer = sr.Recognizer()
         self.is_connected = False
         
@@ -399,6 +432,9 @@ class VoiceController:
                     safe_print(f"💡 {len(self.current_room_lights)} luci trovate: {', '.join(light_names)}")
                 else:
                     safe_print(f"⚠️  Nessuna luce trovata nella stanza {self.current_room_name}")
+                
+                # Imposta cache anche se non ci sono luci (la stanza è comunque stata rilevata)
+                self.room_cache_time = time.time()
             else:
                 safe_print("⚠️  Nessuna stanza rilevata")
                 self.current_room = None
@@ -450,19 +486,35 @@ class VoiceController:
                 # Italiano
                 'tutte le luci', 'tutte le luce', 'tutte luci', 'le luci', 'la luce',
                 # Inglese
-                'all lights', 'all the lights', 'the lights', 'lights'
+                'all lights', 'all the lights', 'the lights'
             ]):
                 for keyword, cmd in commands.items():
                     if keyword in text_lower:
                         return cmd, 'all_lights'
             
-            # Pattern per "luce led" / "luci led" (IT + EN)
+            # Pattern generico "lights" (solo se non è parte di un nome più lungo)
+            import re
+            if re.search(r'\blights\b', text_lower) and 'led' not in text_lower:
+                for keyword, cmd in commands.items():
+                    if keyword in text_lower:
+                        return cmd, 'all_lights'
+            
+            # Pattern per "luce led" / "luci led" / "led" (IT + EN)
+            # Controllo più specifico prima, poi quelli generici
             if any(phrase in text_lower for phrase in [
-                # Italiano
-                'luce led', 'luci led', 'le led', 'i led',
-                # Inglese
-                'led lights', 'led light', 'the led', 'leds'
+                # Italiano - specifici
+                'tutti i led', 'tutte le led', 'luce led', 'luci led', 'le led', 'i led',
+                # Inglese - specifici
+                'led lights', 'led light', 'the led', 'the leds', 'all leds'
             ]):
+                for keyword, cmd in commands.items():
+                    if keyword in text_lower:
+                        return cmd, 'led_lights'
+            
+            # Pattern generici "led" / "leds" (solo se non è parte di un nome più lungo)
+            # Cerca parola "led" isolata o alla fine della frase
+            import re
+            if re.search(r'\b(led|leds)\b', text_lower):
                 for keyword, cmd in commands.items():
                     if keyword in text_lower:
                         return cmd, 'led_lights'
@@ -491,8 +543,8 @@ class VoiceController:
         self.is_listening = True
         
         try:
-            # Rileva prima la stanza tramite BLE
-            self.detect_room()
+            # La stanza è già stata rilevata in _detect_and_listen() prima di chiamare questo metodo
+            # Non serve rilevare di nuovo, altrimenti si rischia di fare una nuova scansione BLE
             
             # Beep di attivazione
             play_beep(800, 60)
@@ -529,8 +581,11 @@ class VoiceController:
                 if action and entity_name:
                     # Gestione comandi di gruppo
                     if entity_name == 'all_lights':
-                        if not self.current_room_lights:
+                        if not self.current_room:
                             safe_print(f"✗ Nessuna stanza rilevata! Esegui prima una scansione BLE.")
+                            play_beep(500, 150)
+                        elif not self.current_room_lights:
+                            safe_print(f"✗ Stanza {self.current_room_name} rilevata, ma nessuna luce configurata in Home Assistant per questa area.")
                             play_beep(500, 150)
                         else:
                             room_info = f" nella stanza {self.current_room_name}" if self.current_room_name else ""
@@ -560,8 +615,11 @@ class VoiceController:
                                 play_beep(500, 150)
                     
                     elif entity_name == 'led_lights':
-                        if not self.current_room_lights:
+                        if not self.current_room:
                             safe_print(f"✗ Nessuna stanza rilevata! Esegui prima una scansione BLE.")
+                            play_beep(500, 150)
+                        elif not self.current_room_lights:
+                            safe_print(f"✗ Stanza {self.current_room_name} rilevata, ma nessuna luce configurata in Home Assistant per questa area.")
                             play_beep(500, 150)
                         else:
                             room_info = f" nella stanza {self.current_room_name}" if self.current_room_name else ""
@@ -1478,6 +1536,660 @@ class EntityWidget(QWidget):
         # Call super().customEvent for unhandled events
         super().customEvent(event)
 
+
+class SettingsWindow(QWidget):
+    """Finestra moderna per la configurazione dei parametri."""
+    
+    def __init__(self, config_file='config.ini'):
+        super().__init__()
+        self.config_file = config_file
+        self.config = configparser.ConfigParser()
+        self.config.read(config_file)
+        self.init_ui()
+    
+    def init_ui(self):
+        """Inizializza l'interfaccia grafica."""
+        self.setWindowTitle("⚙️ Smart Proximity Control - Settings")
+        self.setFixedSize(700, 800)
+        
+        # Stile moderno coerente con l'app principale
+        self.setStyleSheet("""
+            SettingsWindow {
+                background: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #1e3c72, stop:1 #2a5298
+                );
+            }
+            QLabel {
+                color: #ecf0f1;
+                font-size: 10pt;
+                font-weight: 500;
+            }
+            QLabel#section_title {
+                color: #3498db;
+                font-size: 12pt;
+                font-weight: bold;
+                padding: 10px 0px;
+            }
+            QLineEdit, QSpinBox {
+                background-color: rgba(52, 73, 94, 0.8);
+                color: #ecf0f1;
+                border: 2px solid rgba(52, 152, 219, 0.3);
+                border-radius: 6px;
+                padding: 8px;
+                font-size: 10pt;
+            }
+            QLineEdit:focus, QSpinBox:focus {
+                border: 2px solid #3498db;
+            }
+            QCheckBox {
+                color: #ecf0f1;
+                font-size: 10pt;
+                spacing: 8px;
+            }
+            QCheckBox::indicator {
+                width: 20px;
+                height: 20px;
+                border-radius: 4px;
+                border: 2px solid rgba(52, 152, 219, 0.5);
+                background: rgba(52, 73, 94, 0.8);
+            }
+            QCheckBox::indicator:checked {
+                background: #3498db;
+                border-color: #3498db;
+            }
+            QPushButton {
+                background-color: #3498db;
+                color: white;
+                border: none;
+                border-radius: 8px;
+                padding: 12px 24px;
+                font-size: 11pt;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #2980b9;
+            }
+            QPushButton:pressed {
+                background-color: #21618c;
+            }
+            QPushButton#cancel_btn {
+                background-color: rgba(231, 76, 60, 0.8);
+            }
+            QPushButton#cancel_btn:hover {
+                background-color: rgba(192, 57, 43, 0.9);
+            }
+            QScrollArea {
+                border: none;
+                background: transparent;
+            }
+            QWidget#scroll_content {
+                background: transparent;
+            }
+        """)
+        
+        # Layout principale
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(20, 20, 20, 20)
+        main_layout.setSpacing(15)
+        
+        # Titolo
+        title_label = QLabel("⚙️ Configurazione")
+        title_label.setStyleSheet("font-size: 18pt; font-weight: bold; color: #ecf0f1; padding: 10px;")
+        title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        main_layout.addWidget(title_label)
+        
+        # Scroll area per i settings
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        
+        scroll_widget = QWidget()
+        scroll_widget.setObjectName("scroll_content")
+        scroll_layout = QVBoxLayout(scroll_widget)
+        scroll_layout.setSpacing(20)
+        
+        # === Home Assistant Settings ===
+        self.ha_section = self.create_ha_section()
+        scroll_layout.addWidget(self.ha_section)
+        
+        # === BLE Beacons Settings ===
+        self.beacon_section = self.create_beacon_section()
+        scroll_layout.addWidget(self.beacon_section)
+        
+        # === Voice Control Settings ===
+        voice_section = self.create_section("🎤 Voice Control", [
+            ("Abilita Voice Control:", "voice_control", "bool"),
+            ("Hotkey Voice:", "voice_hotkey", "text"),
+            ("Domini Entità:", "entity_domains", "text"),
+            ("Abilita Controllo Gruppi Luci:", "group_lights_control", "bool"),
+        ])
+        scroll_layout.addWidget(voice_section)
+        
+        # === Hotkeys Settings ===
+        hotkey_section = self.create_section("⌨️ Hotkeys", [
+            ("Mostra Finestra:", "show_hotkey", "text"),
+            ("Esci:", "quit_hotkey", "text"),
+        ])
+        scroll_layout.addWidget(hotkey_section)
+        
+        # === GUI Settings ===
+        gui_section = self.create_section("🎨 Interfaccia", [
+            ("Titolo Applicazione:", "title", "text", "[gui]"),
+            ("Dimensione Icone:", "icon_size", "number", "[gui]"),
+            ("Mostra Tooltip:", "show_tooltips", "bool", "[gui]"),
+        ])
+        scroll_layout.addWidget(gui_section)
+        
+        # === Filters Settings ===
+        filter_section = self.create_section("🔍 Filtri", [
+            ("Domini Entità (proximity):", "entity_domains", "text", "[filters]"),
+        ])
+        scroll_layout.addWidget(filter_section)
+        
+        scroll_layout.addStretch()
+        scroll.setWidget(scroll_widget)
+        main_layout.addWidget(scroll)
+        
+        # Pulsanti Salva/Annulla
+        buttons_layout = QHBoxLayout()
+        buttons_layout.setSpacing(15)
+        
+        cancel_btn = QPushButton("✖ Annulla")
+        cancel_btn.setObjectName("cancel_btn")
+        cancel_btn.clicked.connect(self.close)
+        
+        save_btn = QPushButton("💾 Salva e Riavvia Agent")
+        save_btn.clicked.connect(self.save_and_restart)
+        
+        buttons_layout.addWidget(cancel_btn)
+        buttons_layout.addWidget(save_btn)
+        
+        main_layout.addLayout(buttons_layout)
+    
+    def create_ha_section(self):
+        """Crea la sezione Home Assistant con possibilità di aggiungere istanze."""
+        section_frame = QFrame()
+        section_frame.setStyleSheet("""
+            QFrame {
+                background-color: rgba(52, 73, 94, 0.6);
+                border-radius: 12px;
+                padding: 15px;
+            }
+        """)
+        
+        self.ha_layout = QVBoxLayout(section_frame)
+        self.ha_layout.setSpacing(12)
+        
+        # Titolo sezione
+        title_label = QLabel("🏠 Home Assistant")
+        title_label.setObjectName("section_title")
+        self.ha_layout.addWidget(title_label)
+        
+        # Contenitore per le istanze
+        self.ha_instances_layout = QVBoxLayout()
+        self.ha_instances_layout.setSpacing(15)
+        
+        # Conta quante istanze esistono
+        self.ha_instance_count = 1
+        for i in range(2, 6):
+            url_key = f'url_{i}' if i > 1 else 'url'
+            if self.config.has_option('home_assistant', url_key):
+                url = self.config.get('home_assistant', url_key, fallback='')
+                if url:
+                    self.ha_instance_count = i
+        
+        # Crea campi per le istanze esistenti
+        for i in range(1, self.ha_instance_count + 1):
+            self.add_ha_instance_fields(i)
+        
+        self.ha_layout.addLayout(self.ha_instances_layout)
+        
+        # Pulsante Aggiungi Istanza
+        add_btn_layout = QHBoxLayout()
+        self.add_instance_btn = QPushButton("➕ Aggiungi Istanza Home Assistant")
+        self.add_instance_btn.clicked.connect(self.add_new_ha_instance)
+        self.add_instance_btn.setEnabled(self.ha_instance_count < 5)
+        add_btn_layout.addStretch()
+        add_btn_layout.addWidget(self.add_instance_btn)
+        add_btn_layout.addStretch()
+        self.ha_layout.addLayout(add_btn_layout)
+        
+        return section_frame
+    
+    def add_ha_instance_fields(self, instance_num):
+        """Aggiunge i campi per una istanza Home Assistant."""
+        instance_frame = QFrame()
+        instance_frame.setStyleSheet("""
+            QFrame {
+                background-color: rgba(44, 62, 80, 0.4);
+                border-radius: 8px;
+                padding: 10px;
+                margin: 5px 0px;
+            }
+        """)
+        instance_frame.setProperty("instance_num", instance_num)
+        instance_layout = QVBoxLayout(instance_frame)
+        instance_layout.setSpacing(8)
+        
+        # Header con numero istanza e pulsante rimuovi
+        header_layout = QHBoxLayout()
+        header_label = QLabel(f"📍 Istanza {instance_num}" + (" (Primaria)" if instance_num == 1 else ""))
+        header_label.setStyleSheet("color: #3498db; font-weight: bold; font-size: 10pt;")
+        header_layout.addWidget(header_label)
+        
+        # Pulsante rimuovi (solo per istanze > 1)
+        if instance_num > 1:
+            remove_btn = QPushButton("🗑️ Rimuovi")
+            remove_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: rgba(231, 76, 60, 0.7);
+                    color: white;
+                    border: none;
+                    border-radius: 6px;
+                    padding: 6px 12px;
+                    font-size: 9pt;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background-color: rgba(192, 57, 43, 0.9);
+                }
+            """)
+            remove_btn.clicked.connect(lambda: self.remove_ha_instance(instance_frame))
+            header_layout.addStretch()
+            header_layout.addWidget(remove_btn)
+        
+        instance_layout.addLayout(header_layout)
+        
+        # URL
+        url_key = 'url' if instance_num == 1 else f'url_{instance_num}'
+        url_layout = QHBoxLayout()
+        url_label = QLabel("URL:")
+        url_label.setFixedWidth(100)
+        url_field = QLineEdit()
+        url_field.setText(self.config.get('home_assistant', url_key, fallback=''))
+        url_field.setPlaceholderText("http://homeassistant.local:8123")
+        url_field.setObjectName(f"[home_assistant]:{url_key}")
+        url_layout.addWidget(url_label)
+        url_layout.addWidget(url_field)
+        instance_layout.addLayout(url_layout)
+        
+        # Token
+        token_key = 'api_token' if instance_num == 1 else f'api_token_{instance_num}'
+        token_layout = QHBoxLayout()
+        token_label = QLabel("API Token:")
+        token_label.setFixedWidth(100)
+        token_field = QLineEdit()
+        token_field.setEchoMode(QLineEdit.EchoMode.Password)
+        token_field.setText(self.config.get('home_assistant', token_key, fallback=''))
+        token_field.setPlaceholderText("Long-Lived Access Token")
+        token_field.setObjectName(f"[home_assistant]:{token_key}")
+        token_layout.addWidget(token_label)
+        token_layout.addWidget(token_field)
+        instance_layout.addLayout(token_layout)
+        
+        self.ha_instances_layout.addWidget(instance_frame)
+    
+    def add_new_ha_instance(self):
+        """Aggiunge una nuova istanza Home Assistant."""
+        if self.ha_instance_count >= 5:
+            safe_print("⚠️ Massimo 5 istanze raggiunto")
+            return
+        
+        self.ha_instance_count += 1
+        self.add_ha_instance_fields(self.ha_instance_count)
+        
+        # Disabilita il pulsante se raggiunto il massimo
+        if self.ha_instance_count >= 5:
+            self.add_instance_btn.setEnabled(False)
+    
+    def remove_ha_instance(self, instance_frame):
+        """Rimuove un'istanza Home Assistant."""
+        instance_num = instance_frame.property("instance_num")
+        
+        # Rimuovi il frame dal layout
+        self.ha_instances_layout.removeWidget(instance_frame)
+        instance_frame.deleteLater()
+        
+        # Rimuovi i valori dal config
+        url_key = f'url_{instance_num}'
+        token_key = f'api_token_{instance_num}'
+        
+        if self.config.has_option('home_assistant', url_key):
+            self.config.remove_option('home_assistant', url_key)
+        if self.config.has_option('home_assistant', token_key):
+            self.config.remove_option('home_assistant', token_key)
+        
+        # Riabilita il pulsante aggiungi
+        self.add_instance_btn.setEnabled(True)
+        
+        safe_print(f"✓ Istanza {instance_num} rimossa")
+    
+    def create_beacon_section(self):
+        """Crea la sezione BLE Beacons con possibilità di aggiungere/rimuovere beacon."""
+        section_frame = QFrame()
+        section_frame.setStyleSheet("""
+            QFrame {
+                background-color: rgba(52, 73, 94, 0.6);
+                border-radius: 12px;
+                padding: 15px;
+            }
+        """)
+        
+        self.beacon_layout = QVBoxLayout(section_frame)
+        self.beacon_layout.setSpacing(12)
+        
+        # Titolo sezione
+        title_label = QLabel("📡 BLE Beacons")
+        title_label.setObjectName("section_title")
+        self.beacon_layout.addWidget(title_label)
+        
+        # Contenitore per i beacon
+        self.beacons_layout = QVBoxLayout()
+        self.beacons_layout.setSpacing(15)
+        
+        # Carica beacon esistenti da ble_entity.json
+        self.beacon_count = 0
+        ble_mapping = self.load_ble_mapping()
+        if ble_mapping:
+            for mac, area in ble_mapping.items():
+                self.beacon_count += 1
+                self.add_beacon_fields(self.beacon_count, mac, area)
+        
+        # Se non ci sono beacon, aggiungi almeno un campo vuoto
+        if self.beacon_count == 0:
+            self.beacon_count = 1
+            self.add_beacon_fields(1, "", "")
+        
+        self.beacon_layout.addLayout(self.beacons_layout)
+        
+        # Pulsante Aggiungi Beacon
+        add_beacon_btn_layout = QHBoxLayout()
+        self.add_beacon_btn = QPushButton("➕ Aggiungi Beacon BLE")
+        self.add_beacon_btn.clicked.connect(self.add_new_beacon)
+        add_beacon_btn_layout.addStretch()
+        add_beacon_btn_layout.addWidget(self.add_beacon_btn)
+        add_beacon_btn_layout.addStretch()
+        self.beacon_layout.addLayout(add_beacon_btn_layout)
+        
+        return section_frame
+    
+    def load_ble_mapping(self):
+        """Carica la mappatura BLE da ble_entity.json."""
+        base_path = get_base_path()
+        ble_file = os.path.join(base_path, BLE_ENTITY_FILE)
+        
+        if not os.path.exists(ble_file):
+            return {}
+        
+        try:
+            with open(ble_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            # Estrai la mappatura (supporta sia formato vecchio che nuovo)
+            if 'ble_mapping' in data:
+                return data['ble_mapping']
+            elif 'entities' in data:
+                mapping = {}
+                for entity in data['entities']:
+                    if 'mac' in entity and 'area' in entity:
+                        mapping[entity['mac']] = entity['area']
+                return mapping
+            return {}
+        except Exception as e:
+            safe_print(f"⚠️ Errore caricamento beacon: {e}")
+            return {}
+    
+    def add_beacon_fields(self, beacon_num, mac="", area=""):
+        """Aggiunge i campi per un beacon BLE."""
+        beacon_frame = QFrame()
+        beacon_frame.setProperty("beacon_num", beacon_num)
+        beacon_frame.setStyleSheet("""
+            QFrame {
+                background-color: rgba(41, 128, 185, 0.15);
+                border-radius: 8px;
+                padding: 10px;
+            }
+        """)
+        
+        beacon_layout = QVBoxLayout(beacon_frame)
+        beacon_layout.setSpacing(10)
+        
+        # Header con numero beacon e bottone rimuovi
+        header_layout = QHBoxLayout()
+        header_label = QLabel(f"Beacon {beacon_num}")
+        header_label.setStyleSheet("color: #3498db; font-weight: bold;")
+        header_layout.addWidget(header_label)
+        header_layout.addStretch()
+        
+        # Bottone rimuovi (solo se non è l'unico beacon)
+        if self.beacon_count > 1 or (mac and area):
+            remove_btn = QPushButton("🗑️ Rimuovi")
+            remove_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: rgba(231, 76, 60, 0.8);
+                    color: white;
+                    border: none;
+                    border-radius: 6px;
+                    padding: 6px 12px;
+                    font-size: 9pt;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background-color: rgba(192, 57, 43, 0.9);
+                }
+            """)
+            remove_btn.clicked.connect(lambda: self.remove_beacon(beacon_frame))
+            header_layout.addStretch()
+            header_layout.addWidget(remove_btn)
+        
+        beacon_layout.addLayout(header_layout)
+        
+        # Campo MAC Address
+        mac_layout = QHBoxLayout()
+        mac_label = QLabel("MAC Address:")
+        mac_label.setFixedWidth(120)
+        mac_layout.addWidget(mac_label)
+        
+        mac_input = QLineEdit()
+        mac_input.setText(mac)
+        mac_input.setPlaceholderText("AA:BB:CC:DD:EE:FF")
+        mac_input.setObjectName(f"[beacon_{beacon_num}]:mac")
+        mac_layout.addWidget(mac_input)
+        beacon_layout.addLayout(mac_layout)
+        
+        # Campo Area ID
+        area_layout = QHBoxLayout()
+        area_label = QLabel("Area ID:")
+        area_label.setFixedWidth(120)
+        area_layout.addWidget(area_label)
+        
+        area_input = QLineEdit()
+        area_input.setText(area)
+        area_input.setPlaceholderText("bedroom, living_room, kitchen...")
+        area_input.setObjectName(f"[beacon_{beacon_num}]:area")
+        area_layout.addWidget(area_input)
+        beacon_layout.addLayout(area_layout)
+        
+        self.beacons_layout.addWidget(beacon_frame)
+    
+    def add_new_beacon(self):
+        """Aggiunge un nuovo beacon vuoto."""
+        self.beacon_count += 1
+        self.add_beacon_fields(self.beacon_count, "", "")
+        safe_print(f"✓ Aggiunto campo per nuovo beacon {self.beacon_count}")
+    
+    def remove_beacon(self, beacon_frame):
+        """Rimuove un beacon dalla UI e dalla configurazione."""
+        beacon_num = beacon_frame.property("beacon_num")
+        
+        # Rimuovi il frame dalla UI
+        beacon_frame.setParent(None)
+        beacon_frame.deleteLater()
+        
+        # Decrementa il contatore se necessario
+        if self.beacon_count > 1:
+            self.beacon_count -= 1
+        
+        safe_print(f"✓ Beacon {beacon_num} rimosso")
+    
+    def save_ble_mapping(self):
+        """Salva la mappatura BLE in ble_entity.json."""
+        base_path = get_base_path()
+        ble_file = os.path.join(base_path, BLE_ENTITY_FILE)
+        
+        # Raccogli tutti i beacon dai widget
+        ble_mapping = {}
+        for widget in self.findChildren(QWidget):
+            obj_name = widget.objectName()
+            if ':' in obj_name and 'beacon_' in obj_name:
+                section, key = obj_name.split(':')
+                beacon_num = section.strip('[]').replace('beacon_', '')
+                
+                if key == 'mac':
+                    mac = widget.text().strip()
+                    # Trova l'area corrispondente
+                    area_widget = self.findChild(QWidget, f"[beacon_{beacon_num}]:area")
+                    if area_widget and mac:
+                        area = area_widget.text().strip()
+                        if area:  # Salva solo se entrambi i campi sono compilati
+                            ble_mapping[mac.upper()] = area
+        
+        # Salva in formato JSON
+        try:
+            data = {'ble_mapping': ble_mapping}
+            with open(ble_file, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=4)
+            safe_print(f"✓ Salvati {len(ble_mapping)} beacon in {BLE_ENTITY_FILE}")
+        except Exception as e:
+            safe_print(f"✗ Errore salvataggio beacon: {e}")
+    
+    def create_section(self, title, fields):
+        """Crea una sezione di settings."""
+        section_frame = QFrame()
+        section_frame.setStyleSheet("""
+            QFrame {
+                background-color: rgba(52, 73, 94, 0.6);
+                border-radius: 12px;
+                padding: 15px;
+            }
+        """)
+        
+        section_layout = QVBoxLayout(section_frame)
+        section_layout.setSpacing(12)
+        
+        # Titolo sezione
+        title_label = QLabel(title)
+        title_label.setObjectName("section_title")
+        section_layout.addWidget(title_label)
+        
+        # Campi
+        for field_data in fields:
+            label_text = field_data[0]
+            key = field_data[1]
+            field_type = field_data[2]
+            section = field_data[3] if len(field_data) > 3 else "[home_assistant]"
+            
+            field_layout = QHBoxLayout()
+            field_layout.setSpacing(10)
+            
+            label = QLabel(label_text)
+            label.setFixedWidth(220)
+            field_layout.addWidget(label)
+            
+            # Crea il widget appropriato
+            if field_type == "bool":
+                widget = QCheckBox()
+                value = self.config.get(section.strip('[]'), key, fallback='false')
+                widget.setChecked(value.lower() == 'true')
+                widget.setObjectName(f"{section}:{key}")
+            elif field_type == "number":
+                widget = QSpinBox()
+                widget.setRange(16, 128)
+                value = self.config.get(section.strip('[]'), key, fallback='32')
+                widget.setValue(int(value))
+                widget.setObjectName(f"{section}:{key}")
+            elif field_type == "password":
+                widget = QLineEdit()
+                widget.setEchoMode(QLineEdit.EchoMode.Password)
+                value = self.config.get(section.strip('[]'), key, fallback='')
+                widget.setText(value)
+                widget.setObjectName(f"{section}:{key}")
+            else:  # text
+                widget = QLineEdit()
+                value = self.config.get(section.strip('[]'), key, fallback='')
+                widget.setText(value)
+                widget.setObjectName(f"{section}:{key}")
+            
+            field_layout.addWidget(widget)
+            section_layout.addLayout(field_layout)
+        
+        return section_frame
+    
+    def save_and_restart(self):
+        """Salva le configurazioni e riavvia l'agent."""
+        try:
+            # Salva tutte le modifiche
+            self.save_settings()
+            
+            # Messaggio di conferma
+            safe_print("✓ Configurazione salvata! Riavvio agent...")
+            
+            # Chiudi la finestra
+            self.close()
+            
+            # Riavvia l'applicazione
+            QApplication.instance().quit()
+            python = sys.executable
+            os.execl(python, python, *sys.argv)
+            
+        except Exception as e:
+            safe_print(f"✗ Errore salvataggio: {e}")
+    
+    def save_settings(self):
+        """Salva i settings nel file config.ini e ble_entity.json."""
+        saved_count = 0
+        
+        # Salva i beacon in ble_entity.json
+        self.save_ble_mapping()
+        
+        # Trova tutti i widget con objectName impostato
+        for widget in self.findChildren(QWidget):
+            obj_name = widget.objectName()
+            if ':' in obj_name:
+                section, key = obj_name.split(':')
+                section = section.strip('[]')
+                
+                # Salta i beacon (già salvati in ble_entity.json)
+                if section.startswith('beacon_'):
+                    continue
+                
+                # Ottieni il valore
+                if isinstance(widget, QCheckBox):
+                    value = 'true' if widget.isChecked() else 'false'
+                elif isinstance(widget, QSpinBox):
+                    value = str(widget.value())
+                elif isinstance(widget, QLineEdit):
+                    value = widget.text().strip()
+                else:
+                    continue
+                
+                # Salva nel config (anche se vuoto per le istanze HA opzionali)
+                if not self.config.has_section(section):
+                    self.config.add_section(section)
+                
+                # Salva sempre per le istanze HA, altrimenti solo se non vuoto
+                if section == 'home_assistant' or value:
+                    self.config.set(section, key, value)
+                    saved_count += 1
+                    safe_print(f"  → [{section}] {key} = {'***' if 'token' in key else value}")
+        
+        # Scrivi il file
+        with open(self.config_file, 'w') as f:
+            self.config.write(f)
+        
+        safe_print(f"✓ {saved_count} parametri salvati in {self.config_file}")
+
 class HomeAssistantGUI(QWidget):
     """The main application window - Agent mode."""
     area_detected_signal = Signal(str)
@@ -1648,6 +2360,11 @@ class HomeAssistantGUI(QWidget):
         
         tray_menu.addSeparator()
         
+        settings_action = tray_menu.addAction("⚙️ Settings")
+        settings_action.triggered.connect(self.open_settings)
+        
+        tray_menu.addSeparator()
+        
         quit_action = tray_menu.addAction("Esci")
         quit_action.triggered.connect(QApplication.instance().quit)
         
@@ -1667,6 +2384,17 @@ class HomeAssistantGUI(QWidget):
         """Gestisce il click sull'icona del system tray."""
         if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
             self.show_and_scan()
+    
+    def open_settings(self):
+        """Apre la finestra di configurazione."""
+        try:
+            base_path = get_base_path()
+            config_path = os.path.join(base_path, 'config.ini')
+            self.settings_window = SettingsWindow(config_path)
+            self.settings_window.show()
+        except Exception as e:
+            safe_print(f"✗ Errore apertura settings: {e}")
+            logger.error(f"Errore apertura settings: {e}")
     
     def reconnect_to_available_instance(self):
         """Riconnette all'istanza Home Assistant disponibile.
@@ -1786,12 +2514,12 @@ class HomeAssistantGUI(QWidget):
             # Avvia scansione singola
             self.start_ble_scanner(single_scan=True)
         
-        # Avvia timer per nascondere dopo 10 secondi
+        # Avvia timer per nascondere dopo 20 secondi
         self.auto_hide_timer = QTimer(self)
         self.auto_hide_timer.timeout.connect(self.auto_hide)
         self.auto_hide_timer.setSingleShot(True)
-        self.auto_hide_timer.start(10000)  # 10 secondi
-        safe_print(">>> Timer di 10 secondi avviato\\n")
+        self.auto_hide_timer.start(20000)  # 20 secondi
+        safe_print(">>> Timer di 20 secondi avviato\\n")
         
     def auto_hide(self):
         """Nasconde automaticamente la finestra dopo il timeout."""

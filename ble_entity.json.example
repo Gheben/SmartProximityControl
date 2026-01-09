@@ -3,5 +3,6 @@
         "F2:EC:8F:2A:BE:2D": "bedroom",
         "AA:BB:CC:DD:EE:FF": "living_room",
         "11:22:33:44:55:66": "kitchen"
-    }
+    },
+    "_comment": "Questo file può essere modificato manualmente o tramite Settings GUI (tasto dx su icona tray → Settings → sezione BLE Beacons)"
 }
